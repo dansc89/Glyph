@@ -5,7 +5,10 @@ mod core;
 mod pdf;
 mod theme;
 
+use std::path::PathBuf;
+
 fn main() -> eframe::Result<()> {
+    let initial_pdf = std::env::args_os().nth(1).map(PathBuf::from);
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Glyph")
@@ -17,6 +20,6 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "Glyph",
         options,
-        Box::new(|cc| Ok(Box::new(app::GlyphApp::new(cc)))),
+        Box::new(move |cc| Ok(Box::new(app::GlyphApp::new(cc, initial_pdf.clone())))),
     )
 }

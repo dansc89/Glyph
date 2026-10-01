@@ -6,7 +6,9 @@ use crate::theme;
 use eframe::egui;
 use std::path::{Path, PathBuf};
 
-const INITIAL_RENDER_WIDTH: u16 = 1600;
+const INITIAL_RENDER_WIDTH: u16 = 1800;
+const MIN_ZOOM: f32 = 0.1;
+const MAX_ZOOM: f32 = 8.0;
 
 pub struct GlyphApp {
     project: ProjectState,
@@ -18,12 +20,13 @@ pub struct GlyphApp {
     renderer: PdfiumRenderEngine,
     rendered_page: Option<RenderedPage>,
     page_texture: Option<egui::TextureHandle>,
+    fit_to_page_requested: bool,
 }
 
 impl GlyphApp {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, initial_pdf: Option<PathBuf>) -> Self {
         theme::install(&cc.egui_ctx);
-        Self {
+        let mut app = Self {
             project: ProjectState::new("Untitled Glyph Set"),
             pdf_path_input: String::new(),
             status: "Open a PDF to start.".to_owned(),
@@ -33,12 +36,22 @@ impl GlyphApp {
             renderer: PdfiumRenderEngine,
             rendered_page: None,
             page_texture: None,
+            fit_to_page_requested: false,
+        };
+        if let Some(path) = initial_pdf {
+            app.pdf_path_input = path.display().to_string();
+            app.open_pdf(path, &cc.egui_ctx);
         }
+        app
     }
 
     fn open_pdf_from_input(&mut self, ctx: &egui::Context) {
-        let path = PathBuf::from(self.pdf_path_input.trim());
-        self.open_pdf(path, ctx);
+        let path_text = self.pdf_path_input.trim();
+        if path_text.is_empty() {
+            self.status = "Pick a PDF or paste a path first.".to_owned();
+            return;
+        }
+        self.open_pdf(PathBuf::from(path_text), ctx);
     }
 
     fn choose_pdf(&mut self, ctx: &egui::Context) {
@@ -83,8 +96,9 @@ impl GlyphApp {
             Ok(rendered) => {
                 self.install_texture(ctx, rendered);
                 self.status = format!(
-                    "Rendered page {} from {}",
+                    "Rendered page {} of {} — {}",
                     page_index + 1,
+                    self.page_count().unwrap_or(0),
                     display_name(&path)
                 );
             }
@@ -113,7 +127,28 @@ impl GlyphApp {
         self.page_texture = Some(texture);
     }
 
+    fn page_count(&self) -> Option<usize> {
+        self.project
+            .document
+            .as_ref()
+            .map(|document| document.summary.page_count)
+    }
+
+    fn can_go_previous(&self) -> bool {
+        self.project.document.is_some() && self.project.selected_page > 0
+    }
+
+    fn can_go_next(&self) -> bool {
+        self.page_count()
+            .map(|count| self.project.selected_page + 1 < count)
+            .unwrap_or(false)
+    }
+
     fn select_page(&mut self, page_index: usize, ctx: &egui::Context) {
+        let Some(page_count) = self.page_count() else {
+            return;
+        };
+        let page_index = page_index.min(page_count.saturating_sub(1));
         if self.project.selected_page != page_index {
             self.project.selected_page = page_index;
             self.zoom = 1.0;
@@ -121,11 +156,69 @@ impl GlyphApp {
             self.render_selected_page(ctx);
         }
     }
+
+    fn next_page(&mut self, ctx: &egui::Context) {
+        if self.can_go_next() {
+            self.select_page(self.project.selected_page + 1, ctx);
+        }
+    }
+
+    fn previous_page(&mut self, ctx: &egui::Context) {
+        if self.can_go_previous() {
+            self.select_page(self.project.selected_page - 1, ctx);
+        }
+    }
+
+    fn fit_page_to_rect(&mut self, rect: egui::Rect) {
+        let Some(rendered) = &self.rendered_page else {
+            return;
+        };
+        let safe_width = (rect.width() - 64.0).max(100.0);
+        let safe_height = (rect.height() - 64.0).max(100.0);
+        let width_zoom = safe_width / rendered.width as f32;
+        let height_zoom = safe_height / rendered.height as f32;
+        self.zoom = width_zoom.min(height_zoom).clamp(MIN_ZOOM, MAX_ZOOM);
+        self.pan = egui::Vec2::ZERO;
+    }
+
+    fn reset_view(&mut self) {
+        self.zoom = 1.0;
+        self.pan = egui::Vec2::ZERO;
+    }
+
+    fn handle_shortcuts(&mut self, ctx: &egui::Context) {
+        if ctx.input(|input| input.modifiers.command && input.key_pressed(egui::Key::O)) {
+            self.choose_pdf(ctx);
+        }
+        if ctx.input(|input| {
+            input.key_pressed(egui::Key::ArrowRight) || input.key_pressed(egui::Key::PageDown)
+        }) {
+            self.next_page(ctx);
+        }
+        if ctx.input(|input| {
+            input.key_pressed(egui::Key::ArrowLeft) || input.key_pressed(egui::Key::PageUp)
+        }) {
+            self.previous_page(ctx);
+        }
+        if ctx.input(|input| input.key_pressed(egui::Key::Home)) {
+            self.select_page(0, ctx);
+        }
+        if ctx.input(|input| input.key_pressed(egui::Key::End)) {
+            if let Some(page_count) = self.page_count() {
+                self.select_page(page_count.saturating_sub(1), ctx);
+            }
+        }
+        if ctx.input(|input| input.modifiers.command && input.key_pressed(egui::Key::Num0)) {
+            self.reset_view();
+        }
+    }
 }
 
 impl eframe::App for GlyphApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.handle_shortcuts(&ctx);
+
         egui::Panel::top("top_bar").show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("Glyph");
@@ -155,15 +248,36 @@ impl eframe::App for GlyphApp {
                 if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                     self.open_pdf_from_input(&ctx);
                 }
+                ui.small("Tip: glyph /path/to/file.pdf also opens directly.");
                 ui.label(&self.status);
                 ui.separator();
 
                 if let Some(document) = &self.project.document {
-                    ui.label(format!("File: {}", document.display_name()));
-                    ui.label(format!("Pages: {}", document.summary.page_count));
+                    let display_name = document.display_name();
+                    let page_count = document.summary.page_count;
+                    let pages = document.summary.pages.clone();
+                    ui.label(format!("File: {display_name}"));
+                    ui.label(format!(
+                        "Page: {} / {}",
+                        self.project.selected_page + 1,
+                        page_count
+                    ));
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(self.can_go_previous(), egui::Button::new("Previous"))
+                            .clicked()
+                        {
+                            self.previous_page(&ctx);
+                        }
+                        if ui
+                            .add_enabled(self.can_go_next(), egui::Button::new("Next"))
+                            .clicked()
+                        {
+                            self.next_page(&ctx);
+                        }
+                    });
                     ui.separator();
                     ui.heading("Pages");
-                    let pages = document.summary.pages.clone();
                     egui::ScrollArea::vertical().show(ui, |ui| {
                         for page in pages {
                             let label = format!(
@@ -181,12 +295,14 @@ impl eframe::App for GlyphApp {
                     });
                 } else {
                     ui.monospace("No PDF loaded yet.");
+                    ui.add_space(8.0);
+                    ui.label("Open a PDF with the button above, paste a path, or launch Glyph with a PDF path.");
                 }
             });
 
         egui::Panel::bottom("status_bar").show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label("Milestone 2: PDFium-backed rendering, zoom, pan, page sidebar.");
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Shortcuts: Ctrl+O open · ←/→ pages · Home/End first/last · drag pan · scroll zoom");
                 ui.separator();
                 ui.label(&self.status);
             });
@@ -195,14 +311,16 @@ impl eframe::App for GlyphApp {
         egui::CentralPanel::default().show(ui, |ui| {
             ui.horizontal(|ui| {
                 if ui.button("−").clicked() {
-                    self.zoom = (self.zoom * 0.9).max(0.1);
+                    self.zoom = (self.zoom * 0.9).max(MIN_ZOOM);
                 }
                 if ui.button("+").clicked() {
-                    self.zoom = (self.zoom * 1.1).min(8.0);
+                    self.zoom = (self.zoom * 1.1).min(MAX_ZOOM);
                 }
-                if ui.button("Reset view").clicked() {
-                    self.zoom = 1.0;
-                    self.pan = egui::Vec2::ZERO;
+                if ui.button("Reset").clicked() {
+                    self.reset_view();
+                }
+                if ui.button("Fit page").clicked() {
+                    self.fit_to_page_requested = true;
                 }
                 if self.project.document.is_some() && ui.button("Re-render").clicked() {
                     self.render_selected_page(&ctx);
@@ -212,6 +330,10 @@ impl eframe::App for GlyphApp {
 
             let available = ui.available_size();
             let (rect, response) = ui.allocate_exact_size(available, egui::Sense::drag());
+            if self.fit_to_page_requested {
+                self.fit_page_to_rect(rect);
+                self.fit_to_page_requested = false;
+            }
             if response.dragged() {
                 self.pan += response.drag_delta();
             }
@@ -219,7 +341,7 @@ impl eframe::App for GlyphApp {
                 let scroll_y = ui.input(|i| i.smooth_scroll_delta.y);
                 if scroll_y.abs() > 0.0 {
                     let scale = if scroll_y > 0.0 { 1.08 } else { 0.92 };
-                    self.zoom = (self.zoom * scale).clamp(0.1, 8.0);
+                    self.zoom = (self.zoom * scale).clamp(MIN_ZOOM, MAX_ZOOM);
                 }
             }
 
@@ -263,7 +385,7 @@ impl eframe::App for GlyphApp {
                 painter.text(
                     page_rect.center(),
                     egui::Align2::CENTER_CENTER,
-                    "Open a PDF to render it here.\n\nDrag to pan. Scroll or +/- to zoom.",
+                    "Open a PDF to render it here.\n\nDrag to pan. Scroll or +/- to zoom.\nLaunch with: glyph file.pdf",
                     egui::FontId::proportional(22.0),
                     egui::Color32::from_rgb(30, 32, 36),
                 );

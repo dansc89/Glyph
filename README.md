@@ -15,11 +15,12 @@ Glyph is **not** a web wrapper and is **not** a direct Swift/AppKit/PDFKit port.
 
 ## Current visual MVP
 
-- Open a PDF by file picker or path
+- Open a PDF by file picker, pasted path, or CLI argument (`glyph file.pdf`)
 - Render the selected page with PDFium
-- Page list/sidebar
+- Page list/sidebar with previous/next navigation
 - Drag to pan
-- Scroll or +/- to zoom
+- Scroll or +/- to zoom, Fit Page, Reset
+- Keyboard shortcuts: Ctrl+O, Arrow/Page keys, Home/End
 - Dark native shell
 
 ## Install on Omarchy / Arch Linux
@@ -55,4 +56,5 @@ An Arch-friendly source package recipe lives at `packaging/arch/PKGBUILD` for la
 ```bash
 cargo test --locked
 cargo run --locked
+cargo run --locked -- /path/to/file.pdf
 ```
