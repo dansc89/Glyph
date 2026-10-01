@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  linux-x86_64:
+    name: x86_64 Linux artifacts
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Linux GUI/package deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libssl-dev libx11-dev libxi-dev libgl1-mesa-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev desktop-file-utils fakeroot wget
+          cargo install cargo-deb --locked
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Test
+        run: cargo test --locked
+      - name: Build release
+        run: cargo build --locked --release
+      - name: Package tar.gz
+        run: |
+          mkdir -p dist/tar
+          cp target/release/glyph dist/tar/glyph
+          cp README.md dist/tar/README.md
+          tar -C dist/tar -czf dist/glyph-x86_64-unknown-linux-gnu.tar.gz glyph README.md
+      - name: Package deb
+        run: |
+          cargo deb --no-build --output dist/glyph-x86_64.deb
+      - name: Package AppImage
+        run: |
+          mkdir -p AppDir/usr/bin AppDir/usr/share/applications AppDir/usr/share/icons/hicolor/scalable/apps
+          cp target/release/glyph AppDir/usr/bin/glyph
+          cp packaging/linux/glyph.desktop AppDir/usr/share/applications/glyph.desktop
+          cp packaging/linux/glyph.svg AppDir/usr/share/icons/hicolor/scalable/apps/glyph.svg
+          cp packaging/linux/glyph.desktop AppDir/glyph.desktop
+          cp packaging/linux/glyph.svg AppDir/glyph.svg
+          cp packaging/linux/AppRun AppDir/AppRun
+          chmod +x AppDir/AppRun AppDir/usr/bin/glyph
+          desktop-file-validate AppDir/glyph.desktop
+          wget -q https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage -O appimagetool
+          chmod +x appimagetool
+          APPIMAGE_EXTRACT_AND_RUN=1 ARCH=x86_64 ./appimagetool AppDir dist/Glyph-x86_64.AppImage
+      - uses: actions/upload-artifact@v4
+        with:
+          name: glyph-linux-x86_64
+          path: |
+            dist/glyph-x86_64-unknown-linux-gnu.tar.gz
+            dist/glyph-x86_64.deb
+            dist/Glyph-x86_64.AppImage

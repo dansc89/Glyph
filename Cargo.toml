@@ -1,0 +1,32 @@
+[package]
+name = "glyph"
+version = "0.1.0"
+edition = "2024"
+description = "A native, fast Linux PDF editor for drawing-set navigation and linking."
+license = "MIT"
+repository = "https://github.com/dansc89/Glyph"
+
+[dependencies]
+anyhow = "1.0"
+eframe = { version = "0.36.2", default-features = true }
+egui = "0.36.2"
+lopdf = "0.45.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+
+[dev-dependencies]
+tempfile = "3.23"
+
+[package.metadata.deb]
+maintainer = "dansc89"
+copyright = "2026, dansc89"
+extended-description = "Glyph is a native Linux PDF editor for drawing-set navigation, bookmarks, and link workflows."
+section = "graphics"
+priority = "optional"
+assets = [
+    ["target/release/glyph", "usr/bin/glyph", "755"],
+    ["packaging/linux/glyph.desktop", "usr/share/applications/glyph.desktop", "644"],
+    ["packaging/linux/glyph.svg", "usr/share/icons/hicolor/scalable/apps/glyph.svg", "644"],
+    ["README.md", "usr/share/doc/glyph/README.md", "644"],
+]

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Glyph
+Comment=Native Linux PDF drawing-set editor
+Exec=glyph
+Icon=glyph
+Terminal=false
+Categories=Graphics;Viewer;
+MimeType=application/pdf;
