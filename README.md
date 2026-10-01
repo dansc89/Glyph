@@ -50,6 +50,10 @@ An Arch-friendly source package recipe lives at `packaging/arch/PKGBUILD` for la
 
 The living parity checklist is in [`docs/drawbridge-parity.md`](docs/drawbridge-parity.md).
 
+## Releases
+
+Public releases now use the simple Drawbridge-polish train: `1.0`, `1.1`, `1.2`, `1.3`, ... even for small incremental updates. See [`docs/release-policy.md`](docs/release-policy.md).
+
 ## Build locally
 
 ```bash

@@ -61,6 +61,10 @@ jobs:
           wget -q https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage -O appimagetool
           chmod +x appimagetool
           APPIMAGE_EXTRACT_AND_RUN=1 ARCH=x86_64 ./appimagetool AppDir dist/Glyph-x86_64.AppImage
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum Glyph-x86_64.AppImage glyph-omarchy-x86_64.tar.gz glyph-x86_64-unknown-linux-gnu.tar.gz glyph-x86_64.deb install-glyph-appimage.sh ../packaging/linux/glyph.svg > SHA256SUMS
       - uses: actions/upload-artifact@v4
         with:
           name: glyph-linux-x86_64
@@ -70,4 +74,5 @@ jobs:
             dist/glyph-x86_64.deb
             dist/Glyph-x86_64.AppImage
             dist/install-glyph-appimage.sh
+            dist/SHA256SUMS
             packaging/linux/glyph.svg

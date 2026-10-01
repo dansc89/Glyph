@@ -61,6 +61,8 @@ Glyph is a Linux/Rust sister app, not a direct AppKit/PDFKit port. This checklis
 ## Quality bar
 
 - Visual-first. No fake CLI-only milestones.
+- Numbered release train only from here forward: `1.0`, `1.1`, `1.2`, `1.3`, ...
+- Small polish updates are still real releases; do not wait for large batches if the app is better.
 - Local tests for core PDF/document logic.
 - CI-built x86_64 AppImage, `.deb`, and tar.gz before telling user to install.
 - Release assets downloaded back and SHA256 verified before claiming release readiness.
