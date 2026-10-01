@@ -44,6 +44,15 @@ chmod +x Glyph-x86_64.AppImage
 
 From a source checkout, the tarball installer source lives at `packaging/linux/install-tar.sh`.
 
+If you only have the AppImage and your system does not have AppImage/FUSE support, use the included no-FUSE installer instead:
+
+```bash
+./install-glyph-appimage.sh ./Glyph-x86_64.AppImage
+glyph
+```
+
+That extracts the AppImage payload into your user profile and installs a normal `glyph` launcher, so runtime launch does not depend on FUSE. See [`docs/omarchy-install.md`](docs/omarchy-install.md) for the release packaging guarantee.
+
 An Arch-friendly source package recipe lives at `packaging/arch/PKGBUILD` for later AUR packaging.
 
 ## Drawbridge parity

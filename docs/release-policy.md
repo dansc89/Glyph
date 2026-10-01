@@ -19,6 +19,7 @@ Every numbered release should include:
 
 - Omarchy-first `glyph-omarchy-x86_64.tar.gz`.
 - `Glyph-x86_64.AppImage` as alternate portable artifact.
+- `install-glyph-appimage.sh` for no-FUSE AppImage extraction installs.
 - `glyph-x86_64.deb`.
 - `glyph-x86_64-unknown-linux-gnu.tar.gz` compatibility tarball.
 - `SHA256SUMS`.

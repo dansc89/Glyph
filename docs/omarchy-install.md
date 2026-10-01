@@ -1,0 +1,42 @@
+# Omarchy install path
+
+Glyph's Omarchy-first release artifact is:
+
+```text
+glyph-omarchy-x86_64.tar.gz
+```
+
+Use this on a fresh Omarchy desktop when the user should not have to install FUSE, PDFium, GTK/WebKit, OpenSSL, or other add-on packages just to launch Glyph.
+
+```bash
+tar -xzf glyph-omarchy-x86_64.tar.gz
+cd glyph-omarchy-x86_64
+./install-glyph.sh
+glyph
+```
+
+What the tarball contains:
+
+- `glyph` — the release binary.
+- `glyph.desktop` — desktop launcher metadata.
+- `glyph.svg` — app icon.
+- `install-glyph.sh` — user-local installer. It writes only to `~/.local/bin`, `~/.local/share/applications`, and `~/.local/share/icons` unless `GLYPH_INSTALL_DIR` is set.
+
+The AppImage remains available, but it is not the primary Omarchy path because many fresh systems do not ship the legacy FUSE userspace package expected by AppImage runtimes. If a user wants the AppImage path without installing FUSE, ship `install-glyph-appimage.sh` beside `Glyph-x86_64.AppImage` and run:
+
+```bash
+./install-glyph-appimage.sh ./Glyph-x86_64.AppImage
+glyph
+```
+
+That installer uses AppImage's built-in `--appimage-extract` mode, installs the extracted payload under `~/.local/share/glyph/appimage-extracted`, and creates a `glyph` wrapper in `~/.local/bin`. It does not require FUSE at runtime.
+
+Release CI guards this promise by:
+
+- using `pdfium-bundled` so no system PDFium package is needed;
+- failing if `ldd target/release/glyph` reports missing libraries;
+- failing if the binary links GTK, GDK, WebKit, OpenSSL, system PDFium, or FUSE;
+- packaging and syntax-checking both Omarchy tarball and AppImage installers;
+- publishing SHA256 checksums for every release artifact.
+
+Baseline graphics/windowing libraries from the desktop OS are still expected, as with any native Linux GUI app. On Omarchy those are part of the desktop environment, not extra Glyph install steps.
