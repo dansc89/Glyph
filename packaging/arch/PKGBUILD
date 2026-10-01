@@ -1,0 +1,36 @@
+# Maintainer: dansc89
+pkgname=glyph-git
+pkgver=r0.0000000
+pkgrel=1
+pkgdesc="Native Linux PDF drawing-set editor"
+arch=('x86_64')
+url="https://github.com/dansc89/Glyph"
+license=('MIT')
+depends=('fontconfig' 'gtk3' 'libx11' 'libxcursor' 'libxi' 'libxinerama' 'libxkbcommon' 'libxkbcommon-x11' 'libxrandr' 'mesa' 'vulkan-icd-loader' 'wayland')
+makedepends=('desktop-file-utils' 'git' 'pkgconf' 'rust')
+source=('git+https://github.com/dansc89/Glyph.git')
+sha256sums=('SKIP')
+
+pkgver() {
+  cd Glyph
+  printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short=7 HEAD)"
+}
+
+build() {
+  cd Glyph
+  cargo build --release --locked
+}
+
+check() {
+  cd Glyph
+  cargo test --locked
+  desktop-file-validate packaging/linux/glyph.desktop
+}
+
+package() {
+  cd Glyph
+  install -Dm755 target/release/glyph "$pkgdir/usr/bin/glyph"
+  install -Dm644 packaging/linux/glyph.desktop "$pkgdir/usr/share/applications/glyph.desktop"
+  install -Dm644 packaging/linux/glyph.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/glyph.svg"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/glyph/README.md"
+}

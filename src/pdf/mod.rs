@@ -1,3 +1,4 @@
+use pdfium_bundled::pdfium_render::prelude::{PdfRenderConfig, PdfiumError};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use thiserror::Error;
@@ -10,6 +11,8 @@ pub enum PdfError {
     NotPdf(String),
     #[error("PDF load failed: {0}")]
     Load(String),
+    #[error("PDF render failed: {0}")]
+    Render(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -25,26 +28,42 @@ pub struct PdfDocumentSummary {
     pub title: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct RenderedPage {
+    pub page_index: usize,
+    pub width: usize,
+    pub height: usize,
+    pub rgba: Vec<u8>,
+}
+
+impl RenderedPage {
+    pub fn is_valid_rgba_buffer(&self) -> bool {
+        self.width > 0 && self.height > 0 && self.rgba.len() == self.width * self.height * 4
+    }
+}
+
 pub trait PdfEngine {
     fn inspect(&self, path: &Path) -> Result<PdfDocumentSummary, PdfError>;
+}
+
+pub trait PdfRenderEngine {
+    fn render_page(
+        &self,
+        path: &Path,
+        page_index: usize,
+        target_width: u16,
+    ) -> Result<RenderedPage, PdfError>;
 }
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct LopdfInspectionEngine;
 
+#[derive(Debug, Default, Clone, Copy)]
+pub struct PdfiumRenderEngine;
+
 impl PdfEngine for LopdfInspectionEngine {
     fn inspect(&self, path: &Path) -> Result<PdfDocumentSummary, PdfError> {
-        if !path.exists() {
-            return Err(PdfError::MissingFile(path.display().to_string()));
-        }
-        if path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .map(|ext| !ext.eq_ignore_ascii_case("pdf"))
-            .unwrap_or(true)
-        {
-            return Err(PdfError::NotPdf(path.display().to_string()));
-        }
+        validate_pdf_path(path)?;
         let doc = lopdf::Document::load(path).map_err(|err| PdfError::Load(err.to_string()))?;
         let page_count = doc.get_pages().len();
         let pages = (0..page_count)
@@ -60,6 +79,76 @@ impl PdfEngine for LopdfInspectionEngine {
             title,
         })
     }
+}
+
+impl PdfRenderEngine for PdfiumRenderEngine {
+    fn render_page(
+        &self,
+        path: &Path,
+        page_index: usize,
+        target_width: u16,
+    ) -> Result<RenderedPage, PdfError> {
+        validate_pdf_path(path)?;
+        let pdfium =
+            pdfium_bundled::bind_bundled().map_err(|err| PdfError::Render(err.to_string()))?;
+        let document = pdfium
+            .load_pdf_from_file(path, None)
+            .map_err(map_pdfium_load_error)?;
+        let pages = document.pages();
+        if page_index >= pages.len() as usize {
+            return Err(PdfError::Render(format!(
+                "page {} is outside document page count {}",
+                page_index + 1,
+                pages.len()
+            )));
+        }
+        let page = pages
+            .get(page_index as i32)
+            .map_err(|err| PdfError::Render(err.to_string()))?;
+        let target_width = target_width.max(64);
+        let render_config = PdfRenderConfig::new()
+            .set_target_width(target_width as i32)
+            .set_maximum_height(4096)
+            .render_form_data(true)
+            .render_annotations(true);
+        let bitmap = page
+            .render_with_config(&render_config)
+            .map_err(|err| PdfError::Render(err.to_string()))?;
+        let rendered = RenderedPage {
+            page_index,
+            width: bitmap.width() as usize,
+            height: bitmap.height() as usize,
+            rgba: bitmap.as_rgba_bytes(),
+        };
+        if !rendered.is_valid_rgba_buffer() {
+            return Err(PdfError::Render(format!(
+                "renderer returned invalid RGBA buffer: {}x{} with {} bytes",
+                rendered.width,
+                rendered.height,
+                rendered.rgba.len()
+            )));
+        }
+        Ok(rendered)
+    }
+}
+
+fn validate_pdf_path(path: &Path) -> Result<(), PdfError> {
+    if !path.exists() {
+        return Err(PdfError::MissingFile(path.display().to_string()));
+    }
+    if path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| !ext.eq_ignore_ascii_case("pdf"))
+        .unwrap_or(true)
+    {
+        return Err(PdfError::NotPdf(path.display().to_string()));
+    }
+    Ok(())
+}
+
+fn map_pdfium_load_error(err: PdfiumError) -> PdfError {
+    PdfError::Load(err.to_string())
 }
 
 #[cfg(test)]
@@ -84,5 +173,69 @@ mod tests {
         let engine = LopdfInspectionEngine;
         let err = engine.inspect(&path).unwrap_err();
         assert!(matches!(err, PdfError::NotPdf(_)));
+    }
+
+    #[test]
+    fn rendered_page_buffer_validation_checks_rgba_size() {
+        let ok = RenderedPage {
+            page_index: 0,
+            width: 2,
+            height: 2,
+            rgba: vec![255; 16],
+        };
+        assert!(ok.is_valid_rgba_buffer());
+
+        let bad = RenderedPage {
+            page_index: 0,
+            width: 2,
+            height: 2,
+            rgba: vec![255; 15],
+        };
+        assert!(!bad.is_valid_rgba_buffer());
+    }
+
+    #[test]
+    fn pdfium_renders_a_real_pdf_page_to_rgba() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("glyph-smoke.pdf");
+        std::fs::write(&path, minimal_pdf_bytes()).unwrap();
+
+        let rendered = PdfiumRenderEngine.render_page(&path, 0, 320).unwrap();
+
+        assert_eq!(rendered.page_index, 0);
+        assert!(rendered.width >= 300);
+        assert!(rendered.height >= 300);
+        assert!(rendered.is_valid_rgba_buffer());
+        assert!(
+            rendered
+                .rgba
+                .chunks_exact(4)
+                .any(|pixel| pixel != [255, 255, 255, 255])
+        );
+    }
+
+    fn minimal_pdf_bytes() -> Vec<u8> {
+        let objects = [
+            "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
+            "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n",
+            "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>\nendobj\n",
+            "4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n",
+            "5 0 obj\n<< /Length 41 >>\nstream\nBT /F1 24 Tf 50 110 Td (Glyph) Tj ET\nendstream\nendobj\n",
+        ];
+        let mut pdf = String::from("%PDF-1.4\n");
+        let mut offsets = vec![0usize];
+        for object in objects {
+            offsets.push(pdf.len());
+            pdf.push_str(object);
+        }
+        let xref_offset = pdf.len();
+        pdf.push_str("xref\n0 6\n0000000000 65535 f \n");
+        for offset in offsets.iter().skip(1) {
+            pdf.push_str(&format!("{offset:010} 00000 n \n"));
+        }
+        pdf.push_str(&format!(
+            "trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n"
+        ));
+        pdf.into_bytes()
     }
 }

@@ -29,7 +29,11 @@ jobs:
           mkdir -p dist/tar
           cp target/release/glyph dist/tar/glyph
           cp README.md dist/tar/README.md
-          tar -C dist/tar -czf dist/glyph-x86_64-unknown-linux-gnu.tar.gz glyph README.md
+          cp packaging/linux/glyph.desktop dist/tar/glyph.desktop
+          cp packaging/linux/glyph.svg dist/tar/glyph.svg
+          cp packaging/linux/install-appimage.sh dist/install-glyph-appimage.sh
+          chmod +x dist/install-glyph-appimage.sh
+          tar -C dist/tar -czf dist/glyph-x86_64-unknown-linux-gnu.tar.gz glyph README.md glyph.desktop glyph.svg
       - name: Package deb
         run: |
           cargo deb --no-build --output dist/glyph-x86_64.deb
@@ -54,3 +58,5 @@ jobs:
             dist/glyph-x86_64-unknown-linux-gnu.tar.gz
             dist/glyph-x86_64.deb
             dist/Glyph-x86_64.AppImage
+            dist/install-glyph-appimage.sh
+            packaging/linux/glyph.svg
