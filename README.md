@@ -26,29 +26,23 @@ Glyph is **not** a web wrapper and is **not** a direct Swift/AppKit/PDFKit port.
 
 ## Install on Omarchy / Arch Linux
 
-Use the AppImage from the GitHub Actions artifact or release. Do **not** install the `.deb` on Omarchy.
+Use the Omarchy tarball first. It installs from a fresh Omarchy desktop without asking for FUSE or other extra packages.
+
+```bash
+tar -xzf glyph-omarchy-x86_64.tar.gz
+cd glyph-omarchy-x86_64
+./install-glyph.sh
+glyph
+```
+
+The AppImage is still published as an alternate portable artifact:
 
 ```bash
 chmod +x Glyph-x86_64.AppImage
 ./Glyph-x86_64.AppImage
 ```
 
-If AppImage/FUSE support is missing:
-
-```bash
-sudo pacman -S fuse2
-./Glyph-x86_64.AppImage
-```
-
-Clean local install with desktop launcher:
-
-```bash
-chmod +x install-glyph-appimage.sh
-./install-glyph-appimage.sh /path/to/Glyph-x86_64.AppImage
-glyph
-```
-
-From a source checkout, the same helper lives at `packaging/linux/install-appimage.sh`.
+From a source checkout, the tarball installer source lives at `packaging/linux/install-tar.sh`.
 
 An Arch-friendly source package recipe lives at `packaging/arch/PKGBUILD` for later AUR packaging.
 
