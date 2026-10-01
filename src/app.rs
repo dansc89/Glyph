@@ -277,6 +277,7 @@ impl eframe::App for GlyphApp {
                     let display_name = document.display_name();
                     let page_count = document.summary.page_count;
                     let pages = document.summary.pages.clone();
+                    let bookmarks = document.summary.bookmarks.clone();
                     ui.label(format!("File: {display_name}"));
                     ui.label(format!(
                         "Page: {} / {}",
@@ -297,6 +298,42 @@ impl eframe::App for GlyphApp {
                             self.next_page(&ctx);
                         }
                     });
+                    ui.separator();
+                    ui.heading("Bookmarks");
+                    if bookmarks.is_empty() {
+                        ui.small("No PDF outline bookmarks found.");
+                    } else {
+                        egui::ScrollArea::vertical()
+                            .id_salt("bookmark_list")
+                            .max_height(180.0)
+                            .show(ui, |ui| {
+                                for bookmark in bookmarks {
+                                    let indent = 12.0 * bookmark.depth as f32;
+                                    ui.horizontal(|ui| {
+                                        ui.add_space(indent);
+                                        let target = bookmark
+                                            .page_index
+                                            .map(|page_index| format!("p{}", page_index + 1))
+                                            .unwrap_or_else(|| "—".to_owned());
+                                        let label = format!("{}  {target}", bookmark.title);
+                                        if ui
+                                            .add_enabled(
+                                                bookmark.page_index.is_some(),
+                                                egui::Button::new(label).selected(
+                                                    bookmark.page_index == Some(self.project.selected_page),
+                                                ),
+                                            )
+                                            .clicked()
+                                        {
+                                            if let Some(page_index) = bookmark.page_index {
+                                                self.select_page(page_index, &ctx);
+                                            }
+                                        }
+                                    });
+                                }
+                            });
+                    }
+
                     ui.separator();
                     ui.heading("Pages");
                     egui::ScrollArea::vertical().show(ui, |ui| {
