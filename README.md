@@ -52,6 +52,10 @@ From a source checkout, the same helper lives at `packaging/linux/install-appima
 
 An Arch-friendly source package recipe lives at `packaging/arch/PKGBUILD` for later AUR packaging.
 
+## Drawbridge parity
+
+The living parity checklist is in [`docs/drawbridge-parity.md`](docs/drawbridge-parity.md).
+
 ## Build locally
 
 ```bash
