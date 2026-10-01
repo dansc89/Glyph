@@ -15,7 +15,7 @@ Glyph is **not** a web wrapper and is **not** a direct Swift/AppKit/PDFKit port.
 
 ## Current visual MVP
 
-- Open a PDF by file picker, pasted path, or CLI argument (`glyph file.pdf`)
+- Open a PDF by file picker, pasted path, drag-and-drop, or CLI argument (`glyph file.pdf`)
 - Render the selected page with PDFium
 - Page list/sidebar with previous/next navigation
 - Drag to pan

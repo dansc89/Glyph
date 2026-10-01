@@ -186,6 +186,26 @@ impl GlyphApp {
         self.pan = egui::Vec2::ZERO;
     }
 
+    fn handle_dropped_files(&mut self, ctx: &egui::Context) {
+        let dropped_path = ctx.input(|input| {
+            input
+                .raw
+                .dropped_files
+                .iter()
+                .map(|file| file.path().to_path_buf())
+                .find(|path| {
+                    path.extension()
+                        .and_then(|extension| extension.to_str())
+                        .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"))
+                })
+        });
+
+        if let Some(path) = dropped_path {
+            self.pdf_path_input = path.display().to_string();
+            self.open_pdf(path, ctx);
+        }
+    }
+
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
         if ctx.input(|input| input.modifiers.command && input.key_pressed(egui::Key::O)) {
             self.choose_pdf(ctx);
@@ -217,6 +237,7 @@ impl GlyphApp {
 impl eframe::App for GlyphApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.handle_dropped_files(&ctx);
         self.handle_shortcuts(&ctx);
 
         egui::Panel::top("top_bar").show(ui, |ui| {
@@ -248,7 +269,7 @@ impl eframe::App for GlyphApp {
                 if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                     self.open_pdf_from_input(&ctx);
                 }
-                ui.small("Tip: glyph /path/to/file.pdf also opens directly.");
+                ui.small("Tip: glyph /path/to/file.pdf also opens directly. You can drag a PDF onto the window.");
                 ui.label(&self.status);
                 ui.separator();
 
