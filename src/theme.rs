@@ -1,9 +1,16 @@
 use eframe::egui;
 
-pub const SURFACE: egui::Color32 = egui::Color32::from_rgb(18, 20, 24);
-const PANEL: egui::Color32 = egui::Color32::from_rgb(24, 27, 33);
-const TEXT: egui::Color32 = egui::Color32::from_rgb(230, 232, 236);
-const ACCENT: egui::Color32 = egui::Color32::from_rgb(129, 161, 193);
+pub const SURFACE: egui::Color32 = egui::Color32::from_rgb(15, 17, 21);
+pub const PANEL: egui::Color32 = egui::Color32::from_rgb(24, 27, 33);
+pub const PANEL_RAISED: egui::Color32 = egui::Color32::from_rgb(31, 35, 43);
+pub const CONTROL: egui::Color32 = egui::Color32::from_rgb(38, 43, 52);
+pub const CONTROL_HOVER: egui::Color32 = egui::Color32::from_rgb(50, 57, 68);
+pub const CANVAS: egui::Color32 = egui::Color32::from_rgb(12, 14, 18);
+pub const TEXT: egui::Color32 = egui::Color32::from_rgb(232, 235, 240);
+pub const TEXT_MUTED: egui::Color32 = egui::Color32::from_rgb(148, 156, 170);
+pub const ACCENT: egui::Color32 = egui::Color32::from_rgb(129, 161, 193);
+pub const ACCENT_STRONG: egui::Color32 = egui::Color32::from_rgb(153, 188, 222);
+pub const STROKE: egui::Color32 = egui::Color32::from_rgb(54, 60, 72);
 
 pub fn install(ctx: &egui::Context) {
     let mut visuals = egui::Visuals::dark();
