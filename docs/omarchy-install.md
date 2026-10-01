@@ -1,5 +1,14 @@
 # Omarchy install path
 
+Fastest install from a fresh Omarchy desktop:
+
+```bash
+curl -fsSL https://github.com/dansc89/Glyph/releases/download/1.0/install-glyph-omarchy.sh | sh
+glyph
+```
+
+The script downloads the Omarchy tarball, verifies its checksum when `sha256sum` is available, installs to the user profile, and prints the launch command.
+
 Glyph's Omarchy-first release artifact is:
 
 ```text

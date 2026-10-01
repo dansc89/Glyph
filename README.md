@@ -26,7 +26,14 @@ Glyph is **not** a web wrapper and is **not** a direct Swift/AppKit/PDFKit port.
 
 ## Install on Omarchy / Arch Linux
 
-Use the Omarchy tarball first. It installs from a fresh Omarchy desktop without asking for FUSE or other extra packages.
+Easiest path:
+
+```bash
+curl -fsSL https://github.com/dansc89/Glyph/releases/download/1.0/install-glyph-omarchy.sh | sh
+glyph
+```
+
+Manual path: download `glyph-omarchy-x86_64.tar.gz` from the release, then run:
 
 ```bash
 tar -xzf glyph-omarchy-x86_64.tar.gz

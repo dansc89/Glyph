@@ -44,9 +44,12 @@ jobs:
           chmod +x dist/tar/glyph-omarchy-x86_64/install-glyph.sh
           cp packaging/linux/install-appimage.sh dist/install-glyph-appimage.sh
           chmod +x dist/install-glyph-appimage.sh
+          cp packaging/linux/install-omarchy.sh dist/install-glyph-omarchy.sh
+          chmod +x dist/install-glyph-omarchy.sh
           cp packaging/linux/glyph.svg dist/glyph.svg
           sh -n dist/tar/glyph-omarchy-x86_64/install-glyph.sh
           sh -n dist/install-glyph-appimage.sh
+          sh -n dist/install-glyph-omarchy.sh
           tar -C dist/tar -czf dist/glyph-omarchy-x86_64.tar.gz glyph-omarchy-x86_64
           cp dist/glyph-omarchy-x86_64.tar.gz dist/glyph-x86_64-unknown-linux-gnu.tar.gz
       - name: Package deb
@@ -69,7 +72,7 @@ jobs:
       - name: Generate checksums
         run: |
           cd dist
-          sha256sum Glyph-x86_64.AppImage glyph-omarchy-x86_64.tar.gz glyph-x86_64-unknown-linux-gnu.tar.gz glyph-x86_64.deb install-glyph-appimage.sh glyph.svg > SHA256SUMS
+          sha256sum Glyph-x86_64.AppImage glyph-omarchy-x86_64.tar.gz glyph-x86_64-unknown-linux-gnu.tar.gz glyph-x86_64.deb install-glyph-appimage.sh install-glyph-omarchy.sh glyph.svg > SHA256SUMS
       - uses: actions/upload-artifact@v4
         with:
           name: glyph-linux-x86_64
@@ -79,5 +82,6 @@ jobs:
             dist/glyph-x86_64.deb
             dist/Glyph-x86_64.AppImage
             dist/install-glyph-appimage.sh
+            dist/install-glyph-omarchy.sh
             dist/SHA256SUMS
             dist/glyph.svg
