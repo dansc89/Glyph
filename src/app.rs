@@ -38,6 +38,7 @@ pub struct GlyphApp {
     rendered_page: Option<RenderedPage>,
     page_texture: Option<egui::TextureHandle>,
     fit_to_page_requested: bool,
+    last_canvas_pointer: Option<egui::Pos2>,
     sidebar_tab: SidebarTab,
 }
 
@@ -55,6 +56,7 @@ impl GlyphApp {
             rendered_page: None,
             page_texture: None,
             fit_to_page_requested: false,
+            last_canvas_pointer: None,
             sidebar_tab: SidebarTab::Pages,
         };
         if let Some(path) = initial_pdf {
@@ -581,9 +583,15 @@ impl eframe::App for GlyphApp {
                 if response.dragged() {
                     self.pan += ui.input(|i| i.pointer.delta());
                 }
+                if let Some(pointer) = response.hover_pos() {
+                    self.last_canvas_pointer = Some(pointer);
+                }
+
                 if response.hovered() {
-                    let pointer = ui
-                        .input(|i| i.pointer.hover_pos())
+                    let pointer = response
+                        .hover_pos()
+                        .or(self.last_canvas_pointer)
+                        .filter(|pos| rect.contains(*pos))
                         .unwrap_or_else(|| rect.center());
                     let pinch_scale = ui.input(|i| i.zoom_delta());
                     if (pinch_scale - 1.0).abs() > f32::EPSILON {
@@ -748,56 +756,13 @@ fn accent_bar(ui: &mut egui::Ui, color: egui::Color32) {
 }
 
 fn draw_canvas_backdrop(painter: &egui::Painter, rect: egui::Rect) {
-    painter.rect_filled(rect, 12.0, theme::SURFACE);
-    painter.rect_filled(
-        egui::Rect::from_min_max(
-            rect.left_top(),
-            egui::pos2(rect.right(), rect.top() + 150.0),
-        ),
-        12.0,
-        egui::Color32::from_rgba_premultiplied(99, 74, 177, 18),
-    );
+    painter.rect_filled(rect, 10.0, theme::CANVAS);
     painter.rect_stroke(
         rect,
-        12.0,
+        10.0,
         egui::Stroke::new(1.0, theme::STROKE),
         egui::StrokeKind::Inside,
     );
-
-    for x in (rect.left() as i32..rect.right() as i32).step_by(42) {
-        for y in (rect.top() as i32..rect.bottom() as i32).step_by(42) {
-            painter.circle_filled(
-                egui::pos2(x as f32, y as f32),
-                1.0,
-                egui::Color32::from_rgba_premultiplied(196, 181, 253, 18),
-            );
-        }
-    }
-
-    let nodes = [
-        rect.left_top() + egui::vec2(rect.width() * 0.18, rect.height() * 0.22),
-        rect.left_top() + egui::vec2(rect.width() * 0.30, rect.height() * 0.34),
-        rect.left_top() + egui::vec2(rect.width() * 0.16, rect.height() * 0.48),
-        rect.left_top() + egui::vec2(rect.width() * 0.82, rect.height() * 0.22),
-        rect.left_top() + egui::vec2(rect.width() * 0.73, rect.height() * 0.40),
-    ];
-    for pair in nodes.windows(2) {
-        painter.line_segment(
-            [pair[0], pair[1]],
-            egui::Stroke::new(
-                0.8,
-                egui::Color32::from_rgba_premultiplied(139, 92, 246, 34),
-            ),
-        );
-    }
-    for (index, node) in nodes.iter().enumerate() {
-        let color = if index == 1 {
-            theme::ACCENT_STRONG
-        } else {
-            theme::ACCENT_SOFT
-        };
-        painter.circle_filled(*node, 3.0, color);
-    }
 }
 
 fn status_dot(ui: &mut egui::Ui, loaded: bool) {
@@ -960,24 +925,34 @@ fn draw_empty_state(ui: &mut egui::Ui, rect: egui::Rect) {
     );
     painter.rect_filled(accent, 3.0, theme::ACCENT_STRONG);
 
-    let nodes = [
-        card.left_top() + egui::vec2(80.0, 76.0),
-        card.left_top() + egui::vec2(132.0, 50.0),
-        card.left_top() + egui::vec2(168.0, 94.0),
-        card.left_top() + egui::vec2(128.0, 142.0),
-    ];
-    for pair in nodes.windows(2) {
+    let page_icon = egui::Rect::from_min_size(
+        card.left_top() + egui::vec2(62.0, 56.0),
+        egui::vec2(118.0, 150.0),
+    );
+    painter.rect_filled(page_icon, 7.0, theme::SURFACE);
+    painter.rect_stroke(
+        page_icon,
+        7.0,
+        egui::Stroke::new(1.0, theme::STROKE),
+        egui::StrokeKind::Inside,
+    );
+    painter.rect_filled(
+        egui::Rect::from_min_size(
+            page_icon.left_top() + egui::vec2(16.0, 20.0),
+            egui::vec2(68.0, 8.0),
+        ),
+        2.0,
+        theme::STROKE_STRONG,
+    );
+    for row in 0..4 {
+        let y = page_icon.top() + 50.0 + row as f32 * 20.0;
         painter.line_segment(
-            [pair[0], pair[1]],
-            egui::Stroke::new(
-                1.0,
-                egui::Color32::from_rgba_premultiplied(196, 181, 253, 72),
-            ),
+            [
+                egui::pos2(page_icon.left() + 16.0, y),
+                egui::pos2(page_icon.right() - 16.0, y),
+            ],
+            egui::Stroke::new(1.0, theme::STROKE),
         );
-    }
-    for node in nodes {
-        painter.circle_filled(node, 5.0, theme::ACCENT);
-        painter.circle_stroke(node, 8.0, egui::Stroke::new(1.0, theme::ACCENT_SOFT));
     }
 
     let badge = egui::Rect::from_center_size(
