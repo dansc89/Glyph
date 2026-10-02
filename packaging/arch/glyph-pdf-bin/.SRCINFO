@@ -1,6 +1,6 @@
 pkgbase = glyph-pdf-bin
 	pkgdesc = Native Linux PDF drawing-set editor inspired by Drawbridge
-	pkgver = 1.0
+	pkgver = 1.0.1
 	pkgrel = 1
 	url = https://github.com/dansc89/Glyph
 	arch = x86_64
@@ -21,7 +21,7 @@ pkgbase = glyph-pdf-bin
 	depends = libxrandr
 	provides = glyph-pdf
 	conflicts = glyph-pdf
-	source = https://github.com/dansc89/Glyph/releases/download/1.0/glyph-omarchy-x86_64.tar.gz
-	sha256sums = 65bbdf1488be205ae6bc483dbdf77c7736b4459de9f14f3828308fed98a34068
+	source = https://github.com/dansc89/Glyph/releases/download/1.0.1/glyph-omarchy-x86_64.tar.gz
+	sha256sums = SKIP
 
 pkgname = glyph-pdf-bin

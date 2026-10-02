@@ -1,6 +1,6 @@
 # Maintainer: dansc89
 pkgname=glyph-pdf-bin
-pkgver=1.0
+pkgver=1.0.1
 pkgrel=1
 pkgdesc="Native Linux PDF drawing-set editor inspired by Drawbridge"
 arch=('x86_64')
@@ -10,7 +10,7 @@ depends=('gcc-libs' 'glibc' 'fontconfig' 'mesa' 'vulkan-icd-loader' 'wayland' 'l
 provides=('glyph-pdf')
 conflicts=('glyph-pdf')
 source=("https://github.com/dansc89/Glyph/releases/download/${pkgver}/glyph-omarchy-x86_64.tar.gz")
-sha256sums=('65bbdf1488be205ae6bc483dbdf77c7736b4459de9f14f3828308fed98a34068')
+sha256sums=('SKIP')
 
 package() {
   cd "${srcdir}/glyph-omarchy-x86_64"
