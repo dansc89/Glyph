@@ -1,19 +1,22 @@
 use eframe::egui;
 
-pub const SURFACE: egui::Color32 = egui::Color32::from_rgb(12, 13, 16);
-pub const PANEL: egui::Color32 = egui::Color32::from_rgb(20, 22, 27);
-pub const PANEL_RAISED: egui::Color32 = egui::Color32::from_rgb(27, 30, 36);
-pub const CONTROL: egui::Color32 = egui::Color32::from_rgb(35, 39, 47);
-pub const CONTROL_HOVER: egui::Color32 = egui::Color32::from_rgb(48, 54, 65);
-pub const CANVAS: egui::Color32 = egui::Color32::from_rgb(9, 10, 13);
+pub const SURFACE: egui::Color32 = egui::Color32::from_rgb(14, 13, 21);
+pub const PANEL: egui::Color32 = egui::Color32::from_rgb(23, 21, 32);
+pub const PANEL_RAISED: egui::Color32 = egui::Color32::from_rgb(32, 29, 44);
+pub const CONTROL: egui::Color32 = egui::Color32::from_rgb(42, 38, 56);
+pub const CONTROL_HOVER: egui::Color32 = egui::Color32::from_rgb(58, 51, 77);
+pub const CANVAS: egui::Color32 = egui::Color32::from_rgb(11, 10, 17);
+pub const CARD: egui::Color32 = egui::Color32::from_rgb(25, 23, 36);
 pub const TEXT: egui::Color32 = egui::Color32::from_rgb(235, 237, 241);
-pub const TEXT_MUTED: egui::Color32 = egui::Color32::from_rgb(138, 146, 158);
-pub const TEXT_FAINT: egui::Color32 = egui::Color32::from_rgb(93, 101, 113);
-pub const ACCENT: egui::Color32 = egui::Color32::from_rgb(106, 141, 178);
-pub const ACCENT_STRONG: egui::Color32 = egui::Color32::from_rgb(143, 180, 215);
-pub const STROKE: egui::Color32 = egui::Color32::from_rgb(45, 50, 60);
-pub const STROKE_STRONG: egui::Color32 = egui::Color32::from_rgb(67, 75, 88);
-pub const GREEN: egui::Color32 = egui::Color32::from_rgb(104, 171, 122);
+pub const TEXT_MUTED: egui::Color32 = egui::Color32::from_rgb(172, 165, 190);
+pub const TEXT_FAINT: egui::Color32 = egui::Color32::from_rgb(104, 96, 124);
+pub const ACCENT: egui::Color32 = egui::Color32::from_rgb(139, 92, 246);
+pub const ACCENT_STRONG: egui::Color32 = egui::Color32::from_rgb(196, 181, 253);
+pub const ACCENT_SOFT: egui::Color32 = egui::Color32::from_rgb(79, 70, 117);
+pub const STROKE: egui::Color32 = egui::Color32::from_rgb(54, 48, 72);
+pub const STROKE_STRONG: egui::Color32 = egui::Color32::from_rgb(95, 82, 128);
+pub const GREEN: egui::Color32 = egui::Color32::from_rgb(110, 231, 183);
+pub const GOLD: egui::Color32 = egui::Color32::from_rgb(251, 191, 36);
 
 pub fn install(ctx: &egui::Context) {
     let mut visuals = egui::Visuals::dark();

@@ -27,7 +27,8 @@ extended-description = "Glyph is a native Linux PDF editor for drawing-set navig
 section = "graphics"
 priority = "optional"
 assets = [
-    ["target/release/glyph", "usr/bin/glyph", "755"],
+    ["target/release/glyph", "usr/lib/glyph/glyph-bin", "755"],
+    ["packaging/linux/glyph-launcher", "usr/bin/glyph", "755"],
     ["packaging/linux/glyph.desktop", "usr/share/applications/glyph.desktop", "644"],
     ["packaging/linux/glyph.svg", "usr/share/icons/hicolor/scalable/apps/glyph.svg", "644"],
     ["README.md", "usr/share/doc/glyph/README.md", "644"],

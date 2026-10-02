@@ -276,12 +276,14 @@ impl eframe::App for GlyphApp {
         egui::Panel::top("title_bar")
             .frame(
                 egui::Frame::new()
-                    .fill(theme::PANEL)
+                    .fill(theme::SURFACE)
                     .stroke(egui::Stroke::new(1.0, theme::STROKE))
-                    .inner_margin(egui::Margin::symmetric(14, 8)),
+                    .inner_margin(egui::Margin::symmetric(14, 9)),
             )
             .show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
+                    brand_mark(ui);
+                    ui.add_space(8.0);
                     status_dot(ui, self.project.document.is_some());
                     ui.add_space(6.0);
                     ui.label(
@@ -329,28 +331,18 @@ impl eframe::App for GlyphApp {
                 egui::Frame::new()
                     .fill(theme::PANEL)
                     .stroke(egui::Stroke::new(1.0, theme::STROKE))
-                    .inner_margin(egui::Margin::symmetric(12, 12)),
+                    .inner_margin(egui::Margin::symmetric(10, 12)),
             )
             .show(ui, |ui| {
                 ui.vertical(|ui| {
-                    ui.label(
-                        egui::RichText::new("Sheets")
-                            .size(15.0)
-                            .strong()
-                            .color(theme::TEXT),
-                    );
-                    ui.label(
-                        egui::RichText::new("Pages, bookmarks, links")
-                            .size(12.0)
-                            .color(theme::TEXT_MUTED),
-                    );
+                    sidebar_title(ui);
                     ui.add_space(10.0);
 
                     egui::Frame::new()
-                        .fill(theme::PANEL_RAISED)
-                        .stroke(egui::Stroke::new(1.0, theme::STROKE))
-                        .corner_radius(egui::CornerRadius::same(8))
-                        .inner_margin(egui::Margin::same(9))
+                        .fill(theme::CARD)
+                        .stroke(egui::Stroke::new(1.0, theme::STROKE_STRONG))
+                        .corner_radius(egui::CornerRadius::same(10))
+                        .inner_margin(egui::Margin::same(10))
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
                                 if primary_button(ui, "Choose PDF…").clicked() {
@@ -395,11 +387,12 @@ impl eframe::App for GlyphApp {
                         let pages = document.summary.pages.clone();
                         let bookmarks = document.summary.bookmarks.clone();
                         egui::Frame::new()
-                            .fill(theme::PANEL_RAISED)
+                            .fill(theme::CARD)
                             .stroke(egui::Stroke::new(1.0, theme::STROKE))
-                            .corner_radius(egui::CornerRadius::same(8))
+                            .corner_radius(egui::CornerRadius::same(10))
                             .inner_margin(egui::Margin::same(10))
                             .show(ui, |ui| {
+                                accent_bar(ui, theme::ACCENT_STRONG);
                                 ui.horizontal(|ui| {
                                     ui.label(
                                         egui::RichText::new(display_name)
@@ -513,8 +506,9 @@ impl eframe::App for GlyphApp {
                         }
                     } else {
                         egui::Frame::new()
-                            .fill(theme::PANEL_RAISED)
-                            .corner_radius(egui::CornerRadius::same(12))
+                            .fill(theme::CARD)
+                            .stroke(egui::Stroke::new(1.0, theme::STROKE))
+                            .corner_radius(egui::CornerRadius::same(10))
                             .inner_margin(egui::Margin::same(14))
                             .show(ui, |ui| {
                                 ui.label(
@@ -557,7 +551,7 @@ impl eframe::App for GlyphApp {
             .frame(
                 egui::Frame::new()
                     .fill(theme::CANVAS)
-                    .inner_margin(egui::Margin::same(16)),
+                    .inner_margin(egui::Margin::same(14)),
             )
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
@@ -596,32 +590,7 @@ impl eframe::App for GlyphApp {
                 }
 
                 let painter = ui.painter_at(rect);
-                painter.rect_filled(rect, 10.0, theme::SURFACE);
-                painter.rect_stroke(
-                    rect,
-                    10.0,
-                    egui::Stroke::new(1.0, theme::STROKE),
-                    egui::StrokeKind::Inside,
-                );
-
-                for x in (rect.left() as i32..rect.right() as i32).step_by(32) {
-                    painter.line_segment(
-                        [
-                            egui::pos2(x as f32, rect.top()),
-                            egui::pos2(x as f32, rect.bottom()),
-                        ],
-                        egui::Stroke::new(0.5, egui::Color32::from_black_alpha(28)),
-                    );
-                }
-                for y in (rect.top() as i32..rect.bottom() as i32).step_by(32) {
-                    painter.line_segment(
-                        [
-                            egui::pos2(rect.left(), y as f32),
-                            egui::pos2(rect.right(), y as f32),
-                        ],
-                        egui::Stroke::new(0.5, egui::Color32::from_black_alpha(28)),
-                    );
-                }
+                draw_canvas_backdrop(&painter, rect);
 
                 if let (Some(rendered), Some(texture)) = (&self.rendered_page, &self.page_texture) {
                     let page_w = rendered.width as f32 * self.zoom;
@@ -684,6 +653,125 @@ fn toolbar_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
     )
 }
 
+fn brand_mark(ui: &mut egui::Ui) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(24.0, 24.0), egui::Sense::hover());
+    let painter = ui.painter_at(rect.expand(4.0));
+    let center = rect.center();
+    painter.circle_filled(
+        center,
+        12.0,
+        egui::Color32::from_rgba_premultiplied(139, 92, 246, 34),
+    );
+    painter.add(egui::Shape::convex_polygon(
+        vec![
+            center + egui::vec2(0.0, -10.0),
+            center + egui::vec2(9.0, 0.0),
+            center + egui::vec2(0.0, 10.0),
+            center + egui::vec2(-9.0, 0.0),
+        ],
+        theme::ACCENT,
+        egui::Stroke::new(1.0, theme::ACCENT_STRONG),
+    ));
+    painter.line_segment(
+        [
+            center + egui::vec2(-4.0, -2.0),
+            center + egui::vec2(4.0, 2.0),
+        ],
+        egui::Stroke::new(1.2, theme::ACCENT_STRONG),
+    );
+}
+
+fn sidebar_title(ui: &mut egui::Ui) {
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new("Workspace")
+                .size(11.0)
+                .strong()
+                .color(theme::ACCENT_STRONG),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(
+                egui::RichText::new("PDF GRAPH")
+                    .size(10.0)
+                    .monospace()
+                    .color(theme::TEXT_FAINT),
+            );
+        });
+    });
+    ui.add_space(2.0);
+    ui.label(
+        egui::RichText::new("Sheets")
+            .size(20.0)
+            .strong()
+            .color(theme::TEXT),
+    );
+    ui.label(
+        egui::RichText::new("Pages, bookmarks, links")
+            .size(12.0)
+            .color(theme::TEXT_MUTED),
+    );
+}
+
+fn accent_bar(ui: &mut egui::Ui, color: egui::Color32) {
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 3.0), egui::Sense::hover());
+    ui.painter().rect_filled(rect, 2.0, color);
+    ui.add_space(8.0);
+}
+
+fn draw_canvas_backdrop(painter: &egui::Painter, rect: egui::Rect) {
+    painter.rect_filled(rect, 12.0, theme::SURFACE);
+    painter.rect_filled(
+        egui::Rect::from_min_max(
+            rect.left_top(),
+            egui::pos2(rect.right(), rect.top() + 150.0),
+        ),
+        12.0,
+        egui::Color32::from_rgba_premultiplied(99, 74, 177, 18),
+    );
+    painter.rect_stroke(
+        rect,
+        12.0,
+        egui::Stroke::new(1.0, theme::STROKE),
+        egui::StrokeKind::Inside,
+    );
+
+    for x in (rect.left() as i32..rect.right() as i32).step_by(42) {
+        for y in (rect.top() as i32..rect.bottom() as i32).step_by(42) {
+            painter.circle_filled(
+                egui::pos2(x as f32, y as f32),
+                1.0,
+                egui::Color32::from_rgba_premultiplied(196, 181, 253, 18),
+            );
+        }
+    }
+
+    let nodes = [
+        rect.left_top() + egui::vec2(rect.width() * 0.18, rect.height() * 0.22),
+        rect.left_top() + egui::vec2(rect.width() * 0.30, rect.height() * 0.34),
+        rect.left_top() + egui::vec2(rect.width() * 0.16, rect.height() * 0.48),
+        rect.left_top() + egui::vec2(rect.width() * 0.82, rect.height() * 0.22),
+        rect.left_top() + egui::vec2(rect.width() * 0.73, rect.height() * 0.40),
+    ];
+    for pair in nodes.windows(2) {
+        painter.line_segment(
+            [pair[0], pair[1]],
+            egui::Stroke::new(
+                0.8,
+                egui::Color32::from_rgba_premultiplied(139, 92, 246, 34),
+            ),
+        );
+    }
+    for (index, node) in nodes.iter().enumerate() {
+        let color = if index == 1 {
+            theme::ACCENT_STRONG
+        } else {
+            theme::ACCENT_SOFT
+        };
+        painter.circle_filled(*node, 3.0, color);
+    }
+}
+
 fn status_dot(ui: &mut egui::Ui, loaded: bool) {
     let color = if loaded {
         theme::GREEN
@@ -698,7 +786,7 @@ fn primary_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
     ui.add(
         egui::Button::new(
             egui::RichText::new(label)
-                .color(egui::Color32::from_rgb(8, 12, 18))
+                .color(egui::Color32::from_rgb(15, 13, 24))
                 .strong(),
         )
         .fill(theme::ACCENT_STRONG)
@@ -722,7 +810,7 @@ fn tab_button(ui: &mut egui::Ui, tab: SidebarTab, selected: bool) -> egui::Respo
     let (fill, text, stroke) = if selected {
         (
             theme::ACCENT,
-            egui::Color32::from_rgb(8, 12, 18),
+            egui::Color32::WHITE,
             egui::Stroke::new(1.0, theme::ACCENT_STRONG),
         )
     } else {
@@ -785,10 +873,10 @@ fn page_row(ui: &mut egui::Ui, label: &str, selected: bool) -> egui::Response {
     let fill = if selected {
         theme::ACCENT
     } else {
-        theme::CONTROL
+        theme::PANEL_RAISED
     };
     let text = if selected {
-        egui::Color32::from_rgb(8, 12, 18)
+        egui::Color32::WHITE
     } else {
         theme::TEXT
     };
@@ -824,58 +912,95 @@ fn empty_sidebar_note(ui: &mut egui::Ui, note: &str) {
 
 fn draw_empty_state(ui: &mut egui::Ui, rect: egui::Rect) {
     let painter = ui.painter_at(rect);
-    let card = egui::Rect::from_center_size(rect.center(), egui::vec2(430.0, 230.0));
+    let card = egui::Rect::from_center_size(rect.center(), egui::vec2(500.0, 260.0));
     painter.rect_filled(
-        card.translate(egui::vec2(0.0, 8.0)),
-        10.0,
-        egui::Color32::from_black_alpha(95),
+        card.translate(egui::vec2(0.0, 14.0)).expand(8.0),
+        16.0,
+        egui::Color32::from_black_alpha(125),
     );
-    painter.rect_filled(card, 10.0, theme::PANEL);
+    painter.rect_filled(card, 14.0, theme::CARD);
     painter.rect_stroke(
         card,
-        10.0,
+        14.0,
         egui::Stroke::new(1.0, theme::STROKE_STRONG),
         egui::StrokeKind::Inside,
     );
 
-    let badge = egui::Rect::from_center_size(
-        card.center_top() + egui::vec2(0.0, 54.0),
-        egui::vec2(64.0, 28.0),
+    let accent = egui::Rect::from_min_max(
+        card.left_top() + egui::vec2(0.0, 18.0),
+        card.left_top() + egui::vec2(4.0, card.height() - 18.0),
     );
-    painter.rect_filled(badge, 6.0, theme::PANEL_RAISED);
+    painter.rect_filled(accent, 3.0, theme::ACCENT_STRONG);
+
+    let nodes = [
+        card.left_top() + egui::vec2(80.0, 76.0),
+        card.left_top() + egui::vec2(132.0, 50.0),
+        card.left_top() + egui::vec2(168.0, 94.0),
+        card.left_top() + egui::vec2(128.0, 142.0),
+    ];
+    for pair in nodes.windows(2) {
+        painter.line_segment(
+            [pair[0], pair[1]],
+            egui::Stroke::new(
+                1.0,
+                egui::Color32::from_rgba_premultiplied(196, 181, 253, 72),
+            ),
+        );
+    }
+    for node in nodes {
+        painter.circle_filled(node, 5.0, theme::ACCENT);
+        painter.circle_stroke(node, 8.0, egui::Stroke::new(1.0, theme::ACCENT_SOFT));
+    }
+
+    let badge = egui::Rect::from_center_size(
+        card.left_top() + egui::vec2(336.0, 58.0),
+        egui::vec2(112.0, 30.0),
+    );
+    painter.rect_filled(badge, 7.0, theme::PANEL_RAISED);
     painter.rect_stroke(
         badge,
-        6.0,
+        7.0,
         egui::Stroke::new(1.0, theme::STROKE),
         egui::StrokeKind::Inside,
     );
     painter.text(
         badge.center(),
         egui::Align2::CENTER_CENTER,
-        "GLYPH",
+        "GLYPH VAULT",
         egui::FontId::monospace(12.0),
         theme::ACCENT_STRONG,
     );
     painter.text(
-        card.center_top() + egui::vec2(0.0, 103.0),
+        card.left_top() + egui::vec2(252.0, 102.0),
         egui::Align2::CENTER_CENTER,
         "Open a PDF drawing set",
-        egui::FontId::proportional(21.0),
+        egui::FontId::proportional(24.0),
         theme::TEXT,
     );
     painter.text(
-        card.center_top() + egui::vec2(0.0, 134.0),
+        card.left_top() + egui::vec2(318.0, 135.0),
         egui::Align2::CENTER_CENTER,
-        "Drag a PDF here, press Ctrl+O, or paste a path in the sidebar.",
+        "Drag a PDF here, press Ctrl+O, or paste a path.",
         egui::FontId::proportional(13.0),
         theme::TEXT_MUTED,
     );
+    let command = egui::Rect::from_center_size(
+        card.left_top() + egui::vec2(318.0, 178.0),
+        egui::vec2(270.0, 34.0),
+    );
+    painter.rect_filled(command, 8.0, theme::SURFACE);
+    painter.rect_stroke(
+        command,
+        8.0,
+        egui::Stroke::new(1.0, theme::STROKE),
+        egui::StrokeKind::Inside,
+    );
     painter.text(
-        card.center_top() + egui::vec2(0.0, 178.0),
+        command.center(),
         egui::Align2::CENTER_CENTER,
-        "Sheets   ·   Bookmarks   ·   Links   ·   Export",
+        "⌘O  open     /  command palette",
         egui::FontId::monospace(12.0),
-        theme::TEXT_FAINT,
+        theme::TEXT_MUTED,
     );
 }
 

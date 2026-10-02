@@ -33,6 +33,8 @@ curl -fsSL https://github.com/dansc89/Glyph/releases/download/1.0/install-glyph-
 glyph
 ```
 
+The installer creates a normal desktop launcher and a detached `glyph` wrapper. Launching from Terminal now returns control immediately; use `GLYPH_FOREGROUND=1 glyph` only when you deliberately want foreground logs.
+
 AUR-style package recipes are included under `packaging/arch/`:
 
 - `packaging/arch/glyph-pdf-bin/` — binary release recipe intended for AUR publishing as `glyph-pdf-bin`.
@@ -65,7 +67,7 @@ If you only have the AppImage and your system does not have AppImage/FUSE suppor
 glyph
 ```
 
-That extracts the AppImage payload into your user profile and installs a normal `glyph` launcher, so runtime launch does not depend on FUSE. See [`docs/omarchy-install.md`](docs/omarchy-install.md) for the release packaging guarantee.
+That extracts the AppImage payload into your user profile and installs a normal detached `glyph` launcher, so runtime launch does not depend on FUSE or keeping a Terminal window open. See [`docs/omarchy-install.md`](docs/omarchy-install.md) for the release packaging guarantee.
 
 An Arch-friendly source package recipe lives at `packaging/arch/PKGBUILD` for later AUR packaging.
 

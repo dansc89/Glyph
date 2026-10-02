@@ -1,0 +1,24 @@
+#!/usr/bin/env sh
+set -eu
+
+if [ -n "${GLYPH_REAL_BIN:-}" ]; then
+  REAL_BIN=$GLYPH_REAL_BIN
+else
+  SCRIPT_PATH=$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")
+  SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)
+  if BUNDLED_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/../lib/glyph" 2>/dev/null && pwd) && [ -x "$BUNDLED_DIR/glyph-bin" ]; then
+    REAL_BIN="$BUNDLED_DIR/glyph-bin"
+  else
+    REAL_BIN=/usr/lib/glyph/glyph-bin
+  fi
+fi
+
+if [ "${GLYPH_FOREGROUND:-0}" = "1" ]; then
+  exec "$REAL_BIN" "$@"
+fi
+
+if command -v setsid >/dev/null 2>&1; then
+  setsid "$REAL_BIN" "$@" >/dev/null 2>&1 &
+else
+  nohup "$REAL_BIN" "$@" >/dev/null 2>&1 &
+fi

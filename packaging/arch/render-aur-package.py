@@ -59,11 +59,26 @@ source=("https://github.com/dansc89/Glyph/releases/download/${{pkgver}}/glyph-om
 sha256sums=('{sha256}')
 
 package() {{
-  cd \"${{srcdir}}/glyph-omarchy-x86_64\"
-  install -Dm755 glyph \"${{pkgdir}}/usr/bin/glyph\"
-  install -Dm644 glyph.desktop \"${{pkgdir}}/usr/share/applications/glyph.desktop\"
-  install -Dm644 glyph.svg \"${{pkgdir}}/usr/share/icons/hicolor/scalable/apps/glyph.svg\"
-  install -Dm644 README.md \"${{pkgdir}}/usr/share/doc/glyph-pdf/README.md\"
+  cd "${{srcdir}}/glyph-omarchy-x86_64"
+  install -Dm755 glyph "${{pkgdir}}/usr/lib/glyph/glyph-bin"
+  install -Dm755 /dev/stdin "${{pkgdir}}/usr/bin/glyph" <<'EOF'
+#!/usr/bin/env sh
+set -eu
+REAL_BIN=/usr/lib/glyph/glyph-bin
+
+if [ "${{GLYPH_FOREGROUND:-0}}" = "1" ]; then
+  exec "$REAL_BIN" "$@"
+fi
+
+if command -v setsid >/dev/null 2>&1; then
+  setsid "$REAL_BIN" "$@" >/dev/null 2>&1 &
+else
+  nohup "$REAL_BIN" "$@" >/dev/null 2>&1 &
+fi
+EOF
+  install -Dm644 glyph.desktop "${{pkgdir}}/usr/share/applications/glyph.desktop"
+  install -Dm644 glyph.svg "${{pkgdir}}/usr/share/icons/hicolor/scalable/apps/glyph.svg"
+  install -Dm644 README.md "${{pkgdir}}/usr/share/doc/glyph-pdf/README.md"
 }}
 """
 

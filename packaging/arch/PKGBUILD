@@ -31,7 +31,8 @@ check() {
 
 package() {
   cd Glyph
-  install -Dm755 target/release/glyph "$pkgdir/usr/bin/glyph"
+  install -Dm755 target/release/glyph "$pkgdir/usr/lib/glyph/glyph-bin"
+  install -Dm755 packaging/linux/glyph-launcher "$pkgdir/usr/bin/glyph"
   install -Dm644 packaging/linux/glyph.desktop "$pkgdir/usr/share/applications/glyph.desktop"
   install -Dm644 packaging/linux/glyph.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/glyph.svg"
   install -Dm644 README.md "$pkgdir/usr/share/doc/glyph/README.md"

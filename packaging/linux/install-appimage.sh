@@ -41,7 +41,18 @@ cp -R "$TMP_DIR/squashfs-root/." "$INSTALL_ROOT/"
 
 cat > "$WRAPPER" <<EOF
 #!/usr/bin/env sh
-exec "$INSTALL_ROOT/AppRun" "\$@"
+set -eu
+APP_RUN="$INSTALL_ROOT/AppRun"
+
+if [ "\${GLYPH_FOREGROUND:-0}" = "1" ]; then
+  exec "\$APP_RUN" "\$@"
+fi
+
+if command -v setsid >/dev/null 2>&1; then
+  setsid "\$APP_RUN" "\$@" >/dev/null 2>&1 &
+else
+  nohup "\$APP_RUN" "\$@" >/dev/null 2>&1 &
+fi
 EOF
 chmod +x "$WRAPPER"
 

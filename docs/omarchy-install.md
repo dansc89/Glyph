@@ -7,7 +7,7 @@ curl -fsSL https://github.com/dansc89/Glyph/releases/download/1.0/install-glyph-
 glyph
 ```
 
-The script downloads the Omarchy tarball, verifies its checksum when `sha256sum` is available, installs to the user profile, and prints the launch command.
+The script downloads the Omarchy tarball, verifies its checksum when `sha256sum` is available, installs to the user profile, and prints the launch command. It also installs a desktop/menu launcher and a detached `glyph` wrapper, so launching from Terminal does not require leaving that Terminal open. Use `GLYPH_FOREGROUND=1 glyph` only for debugging logs.
 
 Glyph's Omarchy-first release artifact is:
 
@@ -38,7 +38,7 @@ The AppImage remains available, but it is not the primary Omarchy path because m
 glyph
 ```
 
-That installer uses AppImage's built-in `--appimage-extract` mode, installs the extracted payload under `~/.local/share/glyph/appimage-extracted`, and creates a `glyph` wrapper in `~/.local/bin`. It does not require FUSE at runtime.
+That installer uses AppImage's built-in `--appimage-extract` mode, installs the extracted payload under `~/.local/share/glyph/appimage-extracted`, and creates a detached `glyph` wrapper in `~/.local/bin`. It does not require FUSE at runtime or an open Terminal window after launch.
 
 Release CI guards this promise by:
 
@@ -67,6 +67,8 @@ Once published to AUR, the intended Omarchy command is:
 yay -S glyph-pdf-bin
 glyph
 ```
+
+The AUR package installs the same detached launcher behavior: `/usr/bin/glyph` starts the real binary in the background by default, while `GLYPH_FOREGROUND=1 glyph` keeps logs attached for debugging.
 
 Until then, the one-line release installer remains the easiest tested path:
 

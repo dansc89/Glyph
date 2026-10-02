@@ -57,14 +57,15 @@ jobs:
           cargo deb --no-build --output dist/glyph-x86_64.deb
       - name: Package AppImage
         run: |
-          mkdir -p AppDir/usr/bin AppDir/usr/share/applications AppDir/usr/share/icons/hicolor/scalable/apps
-          cp target/release/glyph AppDir/usr/bin/glyph
+          mkdir -p AppDir/usr/bin AppDir/usr/lib/glyph AppDir/usr/share/applications AppDir/usr/share/icons/hicolor/scalable/apps
+          cp target/release/glyph AppDir/usr/lib/glyph/glyph-bin
+          cp packaging/linux/glyph-launcher AppDir/usr/bin/glyph
           cp packaging/linux/glyph.desktop AppDir/usr/share/applications/glyph.desktop
           cp packaging/linux/glyph.svg AppDir/usr/share/icons/hicolor/scalable/apps/glyph.svg
           cp packaging/linux/glyph.desktop AppDir/glyph.desktop
           cp packaging/linux/glyph.svg AppDir/glyph.svg
           cp packaging/linux/AppRun AppDir/AppRun
-          chmod +x AppDir/AppRun AppDir/usr/bin/glyph
+          chmod +x AppDir/AppRun AppDir/usr/bin/glyph AppDir/usr/lib/glyph/glyph-bin
           desktop-file-validate AppDir/glyph.desktop
           wget -q https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage -O appimagetool
           chmod +x appimagetool
