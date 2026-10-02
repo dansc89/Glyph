@@ -26,12 +26,19 @@ Glyph is **not** a web wrapper and is **not** a direct Swift/AppKit/PDFKit port.
 
 ## Install on Omarchy / Arch Linux
 
-Easiest path:
+Easiest path today:
 
 ```bash
 curl -fsSL https://github.com/dansc89/Glyph/releases/download/1.0/install-glyph-omarchy.sh | sh
 glyph
 ```
+
+AUR-style package recipes are included under `packaging/arch/`:
+
+- `packaging/arch/glyph-pdf-bin/` — binary release recipe intended for AUR publishing as `glyph-pdf-bin`.
+- `packaging/arch/PKGBUILD` — source checkout recipe for a future `glyph-pdf-git`/source package.
+
+The plain `glyph` and `glyph-bin` AUR names are already taken by an unrelated ASCII-art project, so this app uses the clearer `glyph-pdf-*` package naming path.
 
 Manual path: download `glyph-omarchy-x86_64.tar.gz` from the release, then run:
 

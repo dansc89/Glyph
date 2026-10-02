@@ -49,3 +49,28 @@ Release CI guards this promise by:
 - publishing SHA256 checksums for every release artifact.
 
 Baseline graphics/windowing libraries from the desktop OS are still expected, as with any native Linux GUI app. On Omarchy those are part of the desktop environment, not extra Glyph install steps.
+
+## AUR / pacman path
+
+Yes: Omarchy is Arch-based, so the clean package-manager path is an AUR package installable with an AUR helper such as `yay`/`paru`, then launched like any other desktop app.
+
+Prepared package recipes live in the repo:
+
+- `packaging/arch/glyph-pdf-bin/` — binary-release package recipe, intended for AUR publication as `glyph-pdf-bin`.
+- `packaging/arch/PKGBUILD` — source-build recipe, intended to become a `glyph-pdf-git`/source package path later.
+
+The AUR names `glyph` and `glyph-bin` are already occupied by an unrelated ASCII-art/video project, so Glyph PDF should use `glyph-pdf-bin` instead of trying to claim `glyph`.
+
+Once published to AUR, the intended Omarchy command is:
+
+```bash
+yay -S glyph-pdf-bin
+glyph
+```
+
+Until then, the one-line release installer remains the easiest tested path:
+
+```bash
+curl -fsSL https://github.com/dansc89/Glyph/releases/download/1.0/install-glyph-omarchy.sh | sh
+glyph
+```

@@ -1,13 +1,15 @@
 # Maintainer: dansc89
-pkgname=glyph-git
+pkgname=glyph-pdf-git
 pkgver=r0.0000000
 pkgrel=1
-pkgdesc="Native Linux PDF drawing-set editor"
+pkgdesc="Native Linux PDF drawing-set editor inspired by Drawbridge"
 arch=('x86_64')
 url="https://github.com/dansc89/Glyph"
 license=('MIT')
-depends=('fontconfig' 'gtk3' 'libx11' 'libxcursor' 'libxi' 'libxinerama' 'libxkbcommon' 'libxkbcommon-x11' 'libxrandr' 'mesa' 'vulkan-icd-loader' 'wayland')
+depends=('gcc-libs' 'glibc' 'fontconfig' 'libx11' 'libxcb' 'libxcursor' 'libxi' 'libxinerama' 'libxkbcommon' 'libxkbcommon-x11' 'libxrandr' 'mesa' 'vulkan-icd-loader' 'wayland')
 makedepends=('desktop-file-utils' 'git' 'pkgconf' 'rust')
+provides=('glyph-pdf')
+conflicts=('glyph-pdf')
 source=('git+https://github.com/dansc89/Glyph.git')
 sha256sums=('SKIP')
 
