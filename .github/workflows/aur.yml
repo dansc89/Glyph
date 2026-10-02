@@ -1,0 +1,107 @@
+name: Publish AUR
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release tag/version to publish, e.g. 1.0
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  glyph-pdf-bin:
+    name: Publish glyph-pdf-bin to AUR
+    runs-on: ubuntu-24.04
+    if: ${{ github.event_name == 'workflow_dispatch' || !github.event.release.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve release version
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            version="${{ inputs.version }}"
+          else
+            version="${{ github.event.release.tag_name }}"
+          fi
+          version="${version#v}"
+          if ! [[ "$version" =~ ^[0-9][0-9A-Za-z._+-]*$ ]]; then
+            echo "Invalid AUR pkgver: $version" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Download release tarball and checksum
+        id: tarball
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ steps.release.outputs.version }}"
+          url="https://github.com/dansc89/Glyph/releases/download/${version}/glyph-omarchy-x86_64.tar.gz"
+          curl -fsSL "$url" -o glyph-omarchy-x86_64.tar.gz
+          sha256="$(sha256sum glyph-omarchy-x86_64.tar.gz | awk '{print $1}')"
+          echo "sha256=$sha256" >> "$GITHUB_OUTPUT"
+          tar -tzf glyph-omarchy-x86_64.tar.gz >/dev/null
+
+      - name: Render AUR package files
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 packaging/arch/render-aur-package.py \
+            --version "${{ steps.release.outputs.version }}" \
+            --sha256 "${{ steps.tarball.outputs.sha256 }}" \
+            --out-dir aur-package
+          bash -n aur-package/PKGBUILD
+          test -s aur-package/.SRCINFO
+
+      - name: Configure AUR SSH
+        shell: bash
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${AUR_SSH_PRIVATE_KEY:-}" ]; then
+            echo "Missing repository secret AUR_SSH_PRIVATE_KEY" >&2
+            exit 1
+          fi
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > ~/.ssh/aur
+          chmod 600 ~/.ssh/aur
+          ssh-keyscan -t rsa,ecdsa,ed25519 aur.archlinux.org >> ~/.ssh/known_hosts
+          {
+            echo 'Host aur.archlinux.org'
+            echo '  User aur'
+            echo '  IdentityFile ~/.ssh/aur'
+            echo '  IdentitiesOnly yes'
+            echo '  StrictHostKeyChecking yes'
+          } > ~/.ssh/config
+
+      - name: Publish glyph-pdf-bin to AUR
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config --global user.name "Glyph Release Bot"
+          git config --global user.email "actions@github.com"
+          if git clone ssh://aur@aur.archlinux.org/glyph-pdf-bin.git aur-repo; then
+            :
+          else
+            git clone ssh://aur@aur.archlinux.org/glyph-pdf-bin.git aur-repo
+          fi
+          cp aur-package/PKGBUILD aur-package/.SRCINFO aur-repo/
+          cd aur-repo
+          git status --short
+          if git diff --quiet -- PKGBUILD .SRCINFO; then
+            echo "AUR package already up to date."
+            exit 0
+          fi
+          git add PKGBUILD .SRCINFO
+          git commit -m "Update to ${{ steps.release.outputs.version }}"
+          git push origin master
