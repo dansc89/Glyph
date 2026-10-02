@@ -1,5 +1,5 @@
 use lopdf::{Document, Object, ObjectId};
-use pdfium_bundled::pdfium_render::prelude::{PdfRenderConfig, PdfiumError};
+use pdfium_bundled::pdfium_render::prelude::{PdfRenderConfig, Pdfium, PdfiumError};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
@@ -185,8 +185,7 @@ impl PdfRenderEngine for PdfiumRenderEngine {
         target_width: u16,
     ) -> Result<RenderedPage, PdfError> {
         validate_pdf_path(path)?;
-        let pdfium =
-            pdfium_bundled::bind_bundled().map_err(|err| PdfError::Render(err.to_string()))?;
+        let pdfium = bind_bundled_pdfium()?;
         let document = pdfium
             .load_pdf_from_file(path, None)
             .map_err(map_pdfium_load_error)?;
@@ -225,6 +224,18 @@ impl PdfRenderEngine for PdfiumRenderEngine {
             )));
         }
         Ok(rendered)
+    }
+}
+
+fn bind_bundled_pdfium() -> Result<Pdfium, PdfError> {
+    match pdfium_bundled::bind_bundled() {
+        Ok(pdfium) => Ok(pdfium),
+        Err(pdfium_bundled::Error::Bind { reason, .. })
+            if reason.contains("PdfiumLibraryBindingsAlreadyInitialized") =>
+        {
+            Ok(Pdfium::default())
+        }
+        Err(err) => Err(PdfError::Render(err.to_string())),
     }
 }
 
@@ -308,6 +319,21 @@ mod tests {
                 .chunks_exact(4)
                 .any(|pixel| pixel != [255, 255, 255, 255])
         );
+    }
+
+    #[test]
+    fn pdfium_reuses_existing_binding_for_repeated_page_renders() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("glyph-repeat-render.pdf");
+        std::fs::write(&path, minimal_pdf_bytes()).unwrap();
+
+        let first = PdfiumRenderEngine.render_page(&path, 0, 320).unwrap();
+        let second = PdfiumRenderEngine.render_page(&path, 0, 320).unwrap();
+
+        assert_eq!(first.page_index, 0);
+        assert_eq!(second.page_index, 0);
+        assert!(first.is_valid_rgba_buffer());
+        assert!(second.is_valid_rgba_buffer());
     }
 
     #[test]

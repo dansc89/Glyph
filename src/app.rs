@@ -124,8 +124,6 @@ impl GlyphApp {
                 );
             }
             Err(err) => {
-                self.rendered_page = None;
-                self.page_texture = None;
                 self.status = format!("Render failed: {err}");
             }
         }
