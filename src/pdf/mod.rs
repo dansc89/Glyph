@@ -302,38 +302,25 @@ mod tests {
     }
 
     #[test]
-    fn pdfium_renders_a_real_pdf_page_to_rgba() {
+    fn pdfium_renders_a_real_pdf_page_to_rgba_and_reuses_existing_binding() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("glyph-smoke.pdf");
         std::fs::write(&path, minimal_pdf_bytes()).unwrap();
 
         let rendered = PdfiumRenderEngine.render_page(&path, 0, 320).unwrap();
+        let rendered_again = PdfiumRenderEngine.render_page(&path, 0, 320).unwrap();
 
         assert_eq!(rendered.page_index, 0);
         assert!(rendered.width >= 300);
         assert!(rendered.height >= 300);
         assert!(rendered.is_valid_rgba_buffer());
+        assert!(rendered_again.is_valid_rgba_buffer());
         assert!(
             rendered
                 .rgba
                 .chunks_exact(4)
                 .any(|pixel| pixel != [255, 255, 255, 255])
         );
-    }
-
-    #[test]
-    fn pdfium_reuses_existing_binding_for_repeated_page_renders() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("glyph-repeat-render.pdf");
-        std::fs::write(&path, minimal_pdf_bytes()).unwrap();
-
-        let first = PdfiumRenderEngine.render_page(&path, 0, 320).unwrap();
-        let second = PdfiumRenderEngine.render_page(&path, 0, 320).unwrap();
-
-        assert_eq!(first.page_index, 0);
-        assert_eq!(second.page_index, 0);
-        assert!(first.is_valid_rgba_buffer());
-        assert!(second.is_valid_rgba_buffer());
     }
 
     #[test]
