@@ -29,7 +29,7 @@ Glyph is **not** a web wrapper and is **not** a direct Swift/AppKit/PDFKit port.
 Easiest path today:
 
 ```bash
-curl -fsSL https://github.com/dansc89/Glyph/releases/download/1.0.3/install-glyph-omarchy.sh | sh
+curl -fsSL https://github.com/dansc89/Glyph/releases/download/1.0.4/install-glyph-omarchy.sh | sh
 glyph
 ```
 
