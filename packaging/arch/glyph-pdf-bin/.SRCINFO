@@ -22,6 +22,6 @@ pkgbase = glyph-pdf-bin
 	provides = glyph-pdf
 	conflicts = glyph-pdf
 	source = https://github.com/dansc89/Glyph/releases/download/1.0.6/glyph-omarchy-x86_64.tar.gz
-	sha256sums = 8596a4b182aaa5adbeabe002c39a69caa86ec43cd0bda9a0435ec1a9d13fe603
+	sha256sums = e27f2a3f3d5b613608f8049757d05df54c1b196f1c529a9d2f2779eb7987a3e2
 
 pkgname = glyph-pdf-bin
