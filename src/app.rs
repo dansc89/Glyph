@@ -6,7 +6,9 @@ use crate::theme;
 use eframe::egui;
 use std::path::{Path, PathBuf};
 
-const INITIAL_RENDER_WIDTH: u16 = 1800;
+const BASE_RENDER_WIDTH: u16 = 1800;
+const MAX_RENDER_WIDTH: u16 = 8192;
+const RERENDER_UPSCALE_THRESHOLD: f32 = 1.15;
 const MIN_ZOOM: f32 = 0.1;
 const MAX_ZOOM: f32 = 8.0;
 
@@ -20,6 +22,7 @@ pub struct GlyphApp {
     renderer: PdfiumRenderEngine,
     rendered_page: Option<RenderedPage>,
     page_texture: Option<egui::TextureHandle>,
+    page_aspect_ratio: Option<f32>,
     fit_to_page_requested: bool,
     last_canvas_pointer: Option<egui::Pos2>,
 }
@@ -37,6 +40,7 @@ impl GlyphApp {
             renderer: PdfiumRenderEngine,
             rendered_page: None,
             page_texture: None,
+            page_aspect_ratio: None,
             fit_to_page_requested: false,
             last_canvas_pointer: None,
         };
@@ -75,8 +79,9 @@ impl GlyphApp {
                 self.pan = egui::Vec2::ZERO;
                 self.rendered_page = None;
                 self.page_texture = None;
+                self.page_aspect_ratio = None;
                 self.status = format!("Opened {}", path.display());
-                self.render_selected_page(ctx);
+                self.render_selected_page(ctx, BASE_RENDER_WIDTH);
             }
             Err(err) => {
                 self.status = format!("Open failed: {err}");
@@ -84,17 +89,14 @@ impl GlyphApp {
         }
     }
 
-    fn render_selected_page(&mut self, ctx: &egui::Context) {
+    fn render_selected_page(&mut self, ctx: &egui::Context, target_width: u16) {
         let Some(document) = &self.project.document else {
             return;
         };
         let path = document.path.clone();
         let page_index = self.project.selected_page;
         self.status = format!("Rendering page {}…", page_index + 1);
-        match self
-            .renderer
-            .render_page(&path, page_index, INITIAL_RENDER_WIDTH)
-        {
+        match self.renderer.render_page(&path, page_index, target_width) {
             Ok(rendered) => {
                 self.install_texture(ctx, rendered);
                 self.status = format!(
@@ -111,6 +113,9 @@ impl GlyphApp {
     }
 
     fn install_texture(&mut self, ctx: &egui::Context, rendered: RenderedPage) {
+        if rendered.width > 0 {
+            self.page_aspect_ratio = Some(rendered.height as f32 / rendered.width as f32);
+        }
         let image = egui::ColorImage::from_rgba_unmultiplied(
             [rendered.width, rendered.height],
             &rendered.rgba,
@@ -167,7 +172,8 @@ impl GlyphApp {
             self.project.selected_page = page_index;
             self.zoom = 1.0;
             self.pan = egui::Vec2::ZERO;
-            self.render_selected_page(ctx);
+            self.page_aspect_ratio = None;
+            self.render_selected_page(ctx, BASE_RENDER_WIDTH);
         }
     }
 
@@ -189,10 +195,32 @@ impl GlyphApp {
         };
         let safe_width = (rect.width() - 64.0).max(100.0);
         let safe_height = (rect.height() - 64.0).max(100.0);
-        let width_zoom = safe_width / rendered.width as f32;
-        let height_zoom = safe_height / rendered.height as f32;
+        let logical_size = self.logical_page_size(rendered);
+        let width_zoom = safe_width / logical_size.x;
+        let height_zoom = safe_height / logical_size.y;
         self.zoom = width_zoom.min(height_zoom).clamp(MIN_ZOOM, MAX_ZOOM);
         self.pan = egui::Vec2::ZERO;
+    }
+
+    fn logical_page_size(&self, rendered: &RenderedPage) -> egui::Vec2 {
+        let aspect_ratio = self
+            .page_aspect_ratio
+            .unwrap_or_else(|| rendered.height as f32 / rendered.width.max(1) as f32);
+        egui::vec2(
+            BASE_RENDER_WIDTH as f32,
+            BASE_RENDER_WIDTH as f32 * aspect_ratio,
+        )
+    }
+
+    fn ensure_render_quality(&mut self, ctx: &egui::Context) {
+        let Some(rendered) = &self.rendered_page else {
+            return;
+        };
+        let desired_width = desired_render_width(self.zoom, ctx.pixels_per_point());
+        if desired_width as f32 <= rendered.width as f32 * RERENDER_UPSCALE_THRESHOLD {
+            return;
+        }
+        self.render_selected_page(ctx, desired_width);
     }
 
     fn reset_view(&mut self) {
@@ -279,7 +307,10 @@ impl eframe::App for GlyphApp {
                         self.reset_view();
                     }
                     if self.project.document.is_some() && toolbar_button(ui, "Reload").clicked() {
-                        self.render_selected_page(&ctx);
+                        self.render_selected_page(
+                            &ctx,
+                            desired_render_width(self.zoom, ctx.pixels_per_point()),
+                        );
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         metric_pill(ui, &format_zoom_label(self.zoom));
@@ -489,12 +520,15 @@ impl eframe::App for GlyphApp {
                     }
                 }
 
+                self.ensure_render_quality(ui.ctx());
+
                 let painter = ui.painter_at(rect);
                 draw_canvas_backdrop(&painter, rect);
 
                 if let (Some(rendered), Some(texture)) = (&self.rendered_page, &self.page_texture) {
-                    let page_w = rendered.width as f32 * self.zoom;
-                    let page_h = rendered.height as f32 * self.zoom;
+                    let logical_size = self.logical_page_size(rendered);
+                    let page_w = logical_size.x * self.zoom;
+                    let page_h = logical_size.y * self.zoom;
                     let page_rect = egui::Rect::from_center_size(
                         rect.center() + self.pan,
                         egui::vec2(page_w, page_h),
@@ -537,6 +571,13 @@ fn display_name(path: &Path) -> String {
 
 fn format_zoom_label(zoom: f32) -> String {
     format!("{:.0}%", zoom * 100.0)
+}
+
+fn desired_render_width(zoom: f32, pixels_per_point: f32) -> u16 {
+    let width = BASE_RENDER_WIDTH as f32 * zoom.max(1.0) * pixels_per_point.max(1.0);
+    width
+        .round()
+        .clamp(BASE_RENDER_WIDTH as f32, MAX_RENDER_WIDTH as f32) as u16
 }
 
 fn zoom_around_pointer(
@@ -716,6 +757,15 @@ mod tests {
         assert_eq!(format_zoom_label(1.0), "100%");
         assert_eq!(format_zoom_label(0.333), "33%");
         assert_eq!(format_zoom_label(1.666), "167%");
+    }
+
+    #[test]
+    fn desired_render_width_rerenders_zoomed_pages_at_display_scale() {
+        assert_eq!(desired_render_width(0.5, 1.0), BASE_RENDER_WIDTH);
+        assert_eq!(desired_render_width(1.0, 1.0), BASE_RENDER_WIDTH);
+        assert_eq!(desired_render_width(2.2, 1.0), 3960);
+        assert_eq!(desired_render_width(2.2, 2.0), 7920);
+        assert_eq!(desired_render_width(8.0, 2.0), MAX_RENDER_WIDTH);
     }
 
     #[test]

@@ -41,6 +41,7 @@ def make_colored_pdf(out: Path) -> None:
     for i in range(3):
         add(
             f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+            f"/Resources << /Font << /F1 9 0 R >> >> "
             f"/Contents {6 + i} 0 R >>"
         )
 
@@ -57,9 +58,15 @@ def make_colored_pdf(out: Path) -> None:
             "q 0.10 0.10 0.10 RG 2 w 36 36 540 720 re S Q\n"
             f"q {color} rg {rect} re f Q\n"
             "q 0.20 0.20 0.20 rg 86 86 440 42 re f Q\n"
+            "BT /F1 18 Tf 72 720 Td (Glyph vector text sharpness check 0123456789) Tj ET\n"
+            "BT /F1 10 Tf 72 652 Td (Tiny PDF plan text should rerender at zoom, not upscale a stale bitmap.) Tj ET\n"
+            "BT /F1 12 Tf 210 396 Td (CENTERLINE VECTOR TEXT 0123456789 ABCDEFG) Tj ET\n"
+            "BT /F1 8 Tf 72 128 Td (LEGEND 3/4 PIPE  17-26 WIRES  LATERAL PIPE SIZING  SLEEVE CHART) Tj ET\n"
             f"% {label}\n"
         ).encode("latin1")
         add(b"<< /Length " + str(len(stream)).encode() + b" >>\nstream\n" + stream + b"endstream")
+
+    add("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
 
     buf = b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n"
     offsets: list[int] = []
@@ -161,12 +168,12 @@ def main() -> int:
         shots: list[Path] = []
         shots.append(capture(ffmpeg, "01-open-page-1", out_dir))
 
-        # Coordinates target the fixed 1440x920 default window inside a 1600x1000 Xvfb screen.
-        run([xdotool, "mousemove", "72", "260", "click", "1"], env=env)
+        # Exercise the visible page list.
+        run([xdotool, "mousemove", "75", "262", "click", "1"], env=env)
         time.sleep(1.0)
         shots.append(capture(ffmpeg, "02-click-page-2", out_dir))
 
-        run([xdotool, "mousemove", "72", "306", "click", "1"], env=env)
+        run([xdotool, "mousemove", "75", "294", "click", "1"], env=env)
         time.sleep(1.0)
         shots.append(capture(ffmpeg, "03-click-page-3", out_dir))
 

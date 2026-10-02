@@ -5,6 +5,8 @@ use std::collections::HashMap;
 use std::path::Path;
 use thiserror::Error;
 
+const MAX_RENDER_HEIGHT: i32 = 12_000;
+
 #[derive(Debug, Error)]
 pub enum PdfError {
     #[error("file does not exist: {0}")]
@@ -203,7 +205,7 @@ impl PdfRenderEngine for PdfiumRenderEngine {
         let target_width = target_width.max(64);
         let render_config = PdfRenderConfig::new()
             .set_target_width(target_width as i32)
-            .set_maximum_height(4096)
+            .set_maximum_height(MAX_RENDER_HEIGHT)
             .render_form_data(true)
             .render_annotations(true);
         let bitmap = page
