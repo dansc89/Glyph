@@ -10,7 +10,7 @@ depends=('gcc-libs' 'glibc' 'fontconfig' 'mesa' 'vulkan-icd-loader' 'wayland' 'l
 provides=('glyph-pdf')
 conflicts=('glyph-pdf')
 source=("https://github.com/dansc89/Glyph/releases/download/${pkgver}/glyph-omarchy-x86_64.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('12f5f04d1516f59a357cdfbc8f6a637f46d40ec2aae394c2479bfb975f9aae89')
 
 package() {
   cd "${srcdir}/glyph-omarchy-x86_64"
