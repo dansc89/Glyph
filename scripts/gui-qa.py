@@ -162,11 +162,11 @@ def main() -> int:
         shots.append(capture(ffmpeg, "01-open-page-1", out_dir))
 
         # Coordinates target the fixed 1440x920 default window inside a 1600x1000 Xvfb screen.
-        run([xdotool, "mousemove", "72", "472", "click", "1"], env=env)
+        run([xdotool, "mousemove", "72", "260", "click", "1"], env=env)
         time.sleep(1.0)
         shots.append(capture(ffmpeg, "02-click-page-2", out_dir))
 
-        run([xdotool, "mousemove", "72", "512", "click", "1"], env=env)
+        run([xdotool, "mousemove", "72", "306", "click", "1"], env=env)
         time.sleep(1.0)
         shots.append(capture(ffmpeg, "03-click-page-3", out_dir))
 
