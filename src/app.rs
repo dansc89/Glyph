@@ -5,10 +5,12 @@ use crate::pdf::{
 use crate::theme;
 use eframe::egui;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 const BASE_RENDER_WIDTH: u16 = 1800;
 const MAX_RENDER_WIDTH: u16 = 8192;
 const RERENDER_UPSCALE_THRESHOLD: f32 = 1.15;
+const ZOOM_RERENDER_IDLE: Duration = Duration::from_millis(180);
 const MIN_ZOOM: f32 = 0.1;
 const MAX_ZOOM: f32 = 8.0;
 
@@ -25,6 +27,7 @@ pub struct GlyphApp {
     page_aspect_ratio: Option<f32>,
     fit_to_page_requested: bool,
     last_canvas_pointer: Option<egui::Pos2>,
+    last_zoom_change: Option<Instant>,
 }
 
 impl GlyphApp {
@@ -33,7 +36,7 @@ impl GlyphApp {
         let mut app = Self {
             project: ProjectState::new("Untitled Glyph Set"),
             pdf_path_input: String::new(),
-            status: "Ready — open a PDF.".to_owned(),
+            status: "Ready — drop a PDF, paste a path, or press Ctrl+O.".to_owned(),
             zoom: 1.0,
             pan: egui::Vec2::ZERO,
             inspector: LopdfInspectionEngine,
@@ -43,6 +46,7 @@ impl GlyphApp {
             page_aspect_ratio: None,
             fit_to_page_requested: false,
             last_canvas_pointer: None,
+            last_zoom_change: None,
         };
         if let Some(path) = initial_pdf {
             app.pdf_path_input = path.display().to_string();
@@ -54,7 +58,7 @@ impl GlyphApp {
     fn open_pdf_from_input(&mut self, ctx: &egui::Context) {
         let path_text = self.pdf_path_input.trim();
         if path_text.is_empty() {
-            self.status = "Pick a PDF or paste a path first.".to_owned();
+            self.status = "Paste a PDF path first.".to_owned();
             return;
         }
         self.open_pdf(PathBuf::from(path_text), ctx);
@@ -62,7 +66,7 @@ impl GlyphApp {
 
     fn choose_pdf(&mut self, ctx: &egui::Context) {
         if let Some(path) = rfd::FileDialog::new()
-            .set_title("Open PDF in Glyph")
+            .set_title("Choose PDF in Glyph")
             .add_filter("PDF documents", &["pdf"])
             .pick_file()
         {
@@ -80,11 +84,12 @@ impl GlyphApp {
                 self.rendered_page = None;
                 self.page_texture = None;
                 self.page_aspect_ratio = None;
-                self.status = format!("Opened {}", path.display());
+                self.last_zoom_change = None;
+                self.status = format!("Loaded {}", path.display());
                 self.render_selected_page(ctx, BASE_RENDER_WIDTH);
             }
             Err(err) => {
-                self.status = format!("Open failed: {err}");
+                self.status = format!("Load failed: {err}");
             }
         }
     }
@@ -200,6 +205,7 @@ impl GlyphApp {
         let height_zoom = safe_height / logical_size.y;
         self.zoom = width_zoom.min(height_zoom).clamp(MIN_ZOOM, MAX_ZOOM);
         self.pan = egui::Vec2::ZERO;
+        self.last_zoom_change = Some(Instant::now());
     }
 
     fn logical_page_size(&self, rendered: &RenderedPage) -> egui::Vec2 {
@@ -220,12 +226,23 @@ impl GlyphApp {
         if desired_width as f32 <= rendered.width as f32 * RERENDER_UPSCALE_THRESHOLD {
             return;
         }
+
+        if let Some(last_zoom_change) = self.last_zoom_change {
+            let elapsed = last_zoom_change.elapsed();
+            if elapsed < ZOOM_RERENDER_IDLE {
+                ctx.request_repaint_after(ZOOM_RERENDER_IDLE - elapsed);
+                return;
+            }
+        }
+
         self.render_selected_page(ctx, desired_width);
+        self.last_zoom_change = None;
     }
 
     fn reset_view(&mut self) {
         self.zoom = 1.0;
         self.pan = egui::Vec2::ZERO;
+        self.last_zoom_change = Some(Instant::now());
     }
 
     fn handle_dropped_files(&mut self, ctx: &egui::Context) {
@@ -297,9 +314,6 @@ impl eframe::App for GlyphApp {
                             .color(theme::TEXT),
                     );
                     ui.add_space(12.0);
-                    if toolbar_button(ui, "Open").clicked() {
-                        self.choose_pdf(&ctx);
-                    }
                     if toolbar_button(ui, "Fit").clicked() {
                         self.fit_to_page_requested = true;
                     }
@@ -336,18 +350,16 @@ impl eframe::App for GlyphApp {
             )
             .show(ui, |ui| {
                 ui.vertical(|ui| {
-                    ui.horizontal(|ui| {
-                        if primary_button(ui, "Open PDF…").clicked() {
-                            self.choose_pdf(&ctx);
-                        }
-                        if soft_button(ui, "Open path").clicked() {
-                            self.open_pdf_from_input(&ctx);
-                        }
-                    });
-                    ui.add_space(7.0);
+                    ui.label(
+                        egui::RichText::new("PDF path")
+                            .size(11.0)
+                            .strong()
+                            .color(theme::TEXT_MUTED),
+                    );
+                    ui.add_space(4.0);
                     let response = ui.add(
                         egui::TextEdit::singleline(&mut self.pdf_path_input)
-                            .hint_text("/path/to/drawing-set.pdf")
+                            .hint_text("/path/to/drawing-set.pdf  ↵")
                             .desired_width(f32::INFINITY),
                     );
                     if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
@@ -433,7 +445,7 @@ impl eframe::App for GlyphApp {
                                 ui.add_space(4.0);
                                 ui.label(
                                     egui::RichText::new(
-                                        "Open a drawing set to populate pages and bookmarks.",
+                                        "Drop a PDF here, press Ctrl+O, or paste a path and press Enter.",
                                     )
                                     .color(theme::TEXT_MUTED),
                                 );
@@ -455,7 +467,7 @@ impl eframe::App for GlyphApp {
                     ui.separator();
                     ui.label(
                         egui::RichText::new(
-                            "Ctrl+O open · ←/→ sheets · Home/End jump · drag pan · scroll zoom",
+                            "Ctrl+O file picker · Enter loads path · ←/→ sheets · drag pan · scroll zoom",
                         )
                         .color(theme::TEXT_MUTED),
                     );
@@ -472,10 +484,12 @@ impl eframe::App for GlyphApp {
                 ui.horizontal(|ui| {
                     if tool_chip(ui, "−").clicked() {
                         self.zoom = (self.zoom * 0.9).max(MIN_ZOOM);
+                        self.last_zoom_change = Some(Instant::now());
                     }
                     metric_pill(ui, &format_zoom_label(self.zoom));
                     if tool_chip(ui, "+").clicked() {
                         self.zoom = (self.zoom * 1.1).min(MAX_ZOOM);
+                        self.last_zoom_change = Some(Instant::now());
                     }
                     ui.add_space(8.0);
                     if tool_chip(ui, "Fit page").clicked() {
@@ -510,12 +524,14 @@ impl eframe::App for GlyphApp {
                     if (pinch_scale - 1.0).abs() > f32::EPSILON {
                         (self.zoom, self.pan) =
                             zoom_around_pointer(self.zoom, self.pan, pinch_scale, pointer, rect);
+                        self.last_zoom_change = Some(Instant::now());
                     } else {
                         let scroll_y = ui.input(|i| i.smooth_scroll_delta.y);
                         if scroll_y.abs() > 0.0 {
                             let scale = if scroll_y > 0.0 { 1.08 } else { 0.92 };
                             (self.zoom, self.pan) =
                                 zoom_around_pointer(self.zoom, self.pan, scale, pointer, rect);
+                            self.last_zoom_change = Some(Instant::now());
                         }
                     }
                 }
@@ -622,30 +638,6 @@ fn draw_canvas_backdrop(painter: &egui::Painter, rect: egui::Rect) {
     );
 }
 
-fn primary_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
-    ui.add(
-        egui::Button::new(
-            egui::RichText::new(label)
-                .color(egui::Color32::from_rgb(15, 13, 24))
-                .strong(),
-        )
-        .fill(theme::ACCENT_STRONG)
-        .stroke(egui::Stroke::new(1.0, theme::ACCENT))
-        .corner_radius(egui::CornerRadius::same(7))
-        .min_size(egui::vec2(110.0, 32.0)),
-    )
-}
-
-fn soft_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
-    ui.add(
-        egui::Button::new(egui::RichText::new(label).color(theme::TEXT).size(13.0))
-            .fill(theme::CONTROL)
-            .stroke(egui::Stroke::new(1.0, theme::STROKE))
-            .corner_radius(egui::CornerRadius::same(7))
-            .min_size(egui::vec2(88.0, 32.0)),
-    )
-}
-
 fn tool_chip(ui: &mut egui::Ui, label: &str) -> egui::Response {
     ui.add(
         egui::Button::new(egui::RichText::new(label).color(theme::TEXT).size(12.0))
@@ -735,7 +727,7 @@ fn draw_empty_state(ui: &mut egui::Ui, rect: egui::Rect) {
     painter.text(
         panel.center_top() + egui::vec2(0.0, 42.0),
         egui::Align2::CENTER_CENTER,
-        "Open a PDF",
+        "Drop a PDF",
         egui::FontId::proportional(20.0),
         theme::TEXT,
     );

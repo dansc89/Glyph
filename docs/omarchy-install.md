@@ -3,7 +3,7 @@
 Fastest install from a fresh Omarchy desktop:
 
 ```bash
-curl -fsSL https://github.com/dansc89/Glyph/releases/download/1.0.7/install-glyph-omarchy.sh | sh
+curl -fsSL https://github.com/dansc89/Glyph/releases/download/1.0.8/install-glyph-omarchy.sh | sh
 glyph
 ```
 
@@ -73,6 +73,6 @@ The AUR package installs the same detached launcher behavior: `/usr/bin/glyph` s
 Until then, the one-line release installer remains the easiest tested path:
 
 ```bash
-curl -fsSL https://github.com/dansc89/Glyph/releases/download/1.0.7/install-glyph-omarchy.sh | sh
+curl -fsSL https://github.com/dansc89/Glyph/releases/download/1.0.8/install-glyph-omarchy.sh | sh
 glyph
 ```

@@ -5,7 +5,7 @@ Glyph is a Linux/Rust sister app, not a direct AppKit/PDFKit port. This checklis
 ## Implemented in Glyph
 
 - Native dark PDF workspace shell.
-- Open PDF by file picker, pasted path, CLI argument, desktop file `%f`, and drag-and-drop.
+- Load PDF by file picker, pasted path, CLI argument, desktop file `%f`, and drag-and-drop.
 - PDFium page rendering with real-PDF render smoke test.
 - Page sidebar, previous/next navigation, Home/End, arrow/page-key navigation.
 - Zoom, reset, fit-page, drag panning.

@@ -15,7 +15,7 @@ Glyph is **not** a web wrapper and is **not** a direct Swift/AppKit/PDFKit port.
 
 ## Current visual MVP
 
-- Open a PDF by file picker, pasted path, drag-and-drop, or CLI argument (`glyph file.pdf`)
+- Load a PDF by file picker, pasted path, drag-and-drop, or CLI argument (`glyph file.pdf`)
 - Render the selected page with PDFium
 - PDF outline/bookmark sidebar with one-click page jumps
 - Page list/sidebar with previous/next navigation
@@ -29,7 +29,7 @@ Glyph is **not** a web wrapper and is **not** a direct Swift/AppKit/PDFKit port.
 Easiest path today:
 
 ```bash
-curl -fsSL https://github.com/dansc89/Glyph/releases/download/1.0.7/install-glyph-omarchy.sh | sh
+curl -fsSL https://github.com/dansc89/Glyph/releases/download/1.0.8/install-glyph-omarchy.sh | sh
 glyph
 ```
 

@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use thiserror::Error;
 
-const MAX_RENDER_HEIGHT: i32 = 12_000;
+const MAX_RENDER_HEIGHT: i32 = 8_192;
 
 #[derive(Debug, Error)]
 pub enum PdfError {
