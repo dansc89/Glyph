@@ -579,13 +579,23 @@ impl eframe::App for GlyphApp {
                     self.fit_to_page_requested = false;
                 }
                 if response.dragged() {
-                    self.pan += response.drag_delta();
+                    self.pan += ui.input(|i| i.pointer.delta());
                 }
                 if response.hovered() {
-                    let scroll_y = ui.input(|i| i.smooth_scroll_delta.y);
-                    if scroll_y.abs() > 0.0 {
-                        let scale = if scroll_y > 0.0 { 1.08 } else { 0.92 };
-                        self.zoom = (self.zoom * scale).clamp(MIN_ZOOM, MAX_ZOOM);
+                    let pointer = ui
+                        .input(|i| i.pointer.hover_pos())
+                        .unwrap_or_else(|| rect.center());
+                    let pinch_scale = ui.input(|i| i.zoom_delta());
+                    if (pinch_scale - 1.0).abs() > f32::EPSILON {
+                        (self.zoom, self.pan) =
+                            zoom_around_pointer(self.zoom, self.pan, pinch_scale, pointer, rect);
+                    } else {
+                        let scroll_y = ui.input(|i| i.smooth_scroll_delta.y);
+                        if scroll_y.abs() > 0.0 {
+                            let scale = if scroll_y > 0.0 { 1.08 } else { 0.92 };
+                            (self.zoom, self.pan) =
+                                zoom_around_pointer(self.zoom, self.pan, scale, pointer, rect);
+                        }
                     }
                 }
 
@@ -637,6 +647,24 @@ fn display_name(path: &Path) -> String {
 
 fn format_zoom_label(zoom: f32) -> String {
     format!("{:.0}%", zoom * 100.0)
+}
+
+fn zoom_around_pointer(
+    old_zoom: f32,
+    old_pan: egui::Vec2,
+    zoom_factor: f32,
+    pointer: egui::Pos2,
+    viewport: egui::Rect,
+) -> (f32, egui::Vec2) {
+    let new_zoom = (old_zoom * zoom_factor).clamp(MIN_ZOOM, MAX_ZOOM);
+    if (new_zoom - old_zoom).abs() <= f32::EPSILON {
+        return (new_zoom, old_pan);
+    }
+
+    let old_page_center = viewport.center() + old_pan;
+    let document_point_under_pointer = (pointer - old_page_center) / old_zoom;
+    let new_page_center = pointer - document_point_under_pointer * new_zoom;
+    (new_zoom, new_page_center - viewport.center())
 }
 
 fn format_page_counter(selected_page: usize, page_count: usize) -> String {
@@ -1026,5 +1054,42 @@ mod tests {
         assert_eq!(SidebarTab::Pages.label(), "Pages");
         assert_eq!(SidebarTab::Bookmarks.label(), "Bookmarks");
         assert_eq!(SidebarTab::Links.label(), "Links");
+    }
+
+    #[test]
+    fn zoom_around_pointer_keeps_document_point_under_cursor() {
+        let viewport =
+            egui::Rect::from_min_size(egui::pos2(100.0, 50.0), egui::vec2(1200.0, 900.0));
+        let pointer = egui::pos2(900.0, 500.0);
+        let old_zoom = 1.0;
+        let old_pan = egui::vec2(80.0, -40.0);
+        let old_page_center = viewport.center() + old_pan;
+        let document_point = (pointer - old_page_center) / old_zoom;
+
+        let (new_zoom, new_pan) = zoom_around_pointer(old_zoom, old_pan, 1.25, pointer, viewport);
+        let new_page_center = viewport.center() + new_pan;
+        let remapped_pointer = new_page_center + document_point * new_zoom;
+
+        assert_eq!(new_zoom, 1.25);
+        assert!((remapped_pointer.x - pointer.x).abs() < 0.01);
+        assert!((remapped_pointer.y - pointer.y).abs() < 0.01);
+    }
+
+    #[test]
+    fn zoom_around_pointer_clamps_without_drifting_anchor() {
+        let viewport = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1000.0, 700.0));
+        let pointer = egui::pos2(300.0, 250.0);
+        let old_zoom = 7.5;
+        let old_pan = egui::vec2(-120.0, 60.0);
+        let old_page_center = viewport.center() + old_pan;
+        let document_point = (pointer - old_page_center) / old_zoom;
+
+        let (new_zoom, new_pan) = zoom_around_pointer(old_zoom, old_pan, 2.0, pointer, viewport);
+        let new_page_center = viewport.center() + new_pan;
+        let remapped_pointer = new_page_center + document_point * new_zoom;
+
+        assert_eq!(new_zoom, MAX_ZOOM);
+        assert!((remapped_pointer.x - pointer.x).abs() < 0.01);
+        assert!((remapped_pointer.y - pointer.y).abs() < 0.01);
     }
 }
