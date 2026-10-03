@@ -19,6 +19,12 @@ const MAX_TILE_FULL_WIDTH: usize = 32_768;
 const MIN_ZOOM: f32 = 0.1;
 const MAX_ZOOM: f32 = 8.0;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NavigationTab {
+    Pages,
+    Bookmarks,
+}
+
 pub struct GlyphApp {
     project: ProjectState,
     pdf_path_input: String,
@@ -35,6 +41,7 @@ pub struct GlyphApp {
     fit_to_page_requested: bool,
     last_canvas_pointer: Option<egui::Pos2>,
     last_zoom_change: Option<Instant>,
+    navigation_tab: NavigationTab,
 }
 
 impl GlyphApp {
@@ -56,6 +63,7 @@ impl GlyphApp {
             fit_to_page_requested: false,
             last_canvas_pointer: None,
             last_zoom_change: None,
+            navigation_tab: NavigationTab::Pages,
         };
         if let Some(path) = initial_pdf {
             app.pdf_path_input = path.display().to_string();
@@ -460,6 +468,7 @@ impl eframe::App for GlyphApp {
                         let display_name = document.display_name();
                         let page_count = document.summary.page_count;
                         let pages = document.summary.pages.clone();
+                        let bookmarks = document.summary.bookmarks.clone();
                         ui.horizontal(|ui| {
                             ui.label(
                                 egui::RichText::new(display_name)
@@ -507,17 +516,67 @@ impl eframe::App for GlyphApp {
                         });
                         ui.add_space(14.0);
 
-                        section_header(ui, "Pages");
-                        egui::ScrollArea::vertical().show(ui, |ui| {
-                            for page in pages {
-                                let is_selected = self.project.selected_page == page.index;
-                                let title = page.label.as_deref().unwrap_or("Page");
-                                let label = format!("{:>3}   {title}", page.index + 1);
-                                if page_row(ui, &label, is_selected).clicked() {
-                                    self.select_page(page.index, &ctx);
-                                }
+                        ui.horizontal(|ui| {
+                            if nav_tab_button(
+                                ui,
+                                "Pages",
+                                self.navigation_tab == NavigationTab::Pages,
+                            )
+                            .clicked()
+                            {
+                                self.navigation_tab = NavigationTab::Pages;
+                            }
+                            if nav_tab_button(
+                                ui,
+                                "Bookmarks",
+                                self.navigation_tab == NavigationTab::Bookmarks,
+                            )
+                            .clicked()
+                            {
+                                self.navigation_tab = NavigationTab::Bookmarks;
                             }
                         });
+                        ui.add_space(8.0);
+
+                        match self.navigation_tab {
+                            NavigationTab::Pages => {
+                                egui::ScrollArea::vertical().show(ui, |ui| {
+                                    for page in pages {
+                                        let is_selected = self.project.selected_page == page.index;
+                                        let title = page.label.as_deref().unwrap_or("Page");
+                                        let label = format!("{:>3}   {title}", page.index + 1);
+                                        if page_row(ui, &label, is_selected).clicked() {
+                                            self.select_page(page.index, &ctx);
+                                        }
+                                    }
+                                });
+                            }
+                            NavigationTab::Bookmarks => {
+                                if bookmarks.is_empty() {
+                                    empty_sidebar_note(ui, "No bookmarks in this PDF.");
+                                } else {
+                                    egui::ScrollArea::vertical().show(ui, |ui| {
+                                        for bookmark in bookmarks {
+                                            let is_selected = bookmark
+                                                .page_index
+                                                .is_some_and(|page| page == self.project.selected_page);
+                                            let response = bookmark_row(
+                                                ui,
+                                                &bookmark.title,
+                                                bookmark.depth,
+                                                bookmark.page_index,
+                                                is_selected,
+                                            );
+                                            if response.clicked() {
+                                                if let Some(page_index) = bookmark.page_index {
+                                                    self.select_page(page_index, &ctx);
+                                                }
+                                            }
+                                        }
+                                    });
+                                }
+                            }
+                        }
                     } else {
                         egui::Frame::new()
                             .fill(theme::CARD)
@@ -851,6 +910,27 @@ fn metric_pill(ui: &mut egui::Ui, label: &str) {
         });
 }
 
+fn nav_tab_button(ui: &mut egui::Ui, label: &str, selected: bool) -> egui::Response {
+    let fill = if selected {
+        theme::ACCENT
+    } else {
+        theme::PANEL_RAISED
+    };
+    let text = if selected {
+        egui::Color32::WHITE
+    } else {
+        theme::TEXT_MUTED
+    };
+    ui.add(
+        egui::Button::new(egui::RichText::new(label).strong().color(text).size(12.0))
+            .selected(selected)
+            .fill(fill)
+            .stroke(egui::Stroke::new(1.0, theme::STROKE))
+            .corner_radius(egui::CornerRadius::same(6))
+            .min_size(egui::vec2((ui.available_width() - 6.0) / 2.0, 30.0)),
+    )
+}
+
 fn section_header(ui: &mut egui::Ui, label: &str) {
     ui.label(
         egui::RichText::new(label.to_uppercase())
@@ -885,6 +965,44 @@ fn page_row(ui: &mut egui::Ui, label: &str, selected: bool) -> egui::Response {
         .corner_radius(egui::CornerRadius::same(6))
         .min_size(egui::vec2(ui.available_width(), 28.0)),
     )
+}
+
+fn bookmark_row(
+    ui: &mut egui::Ui,
+    title: &str,
+    depth: usize,
+    page_index: Option<usize>,
+    selected: bool,
+) -> egui::Response {
+    let fill = if selected {
+        theme::ACCENT
+    } else {
+        theme::PANEL_RAISED
+    };
+    let text = if selected {
+        egui::Color32::WHITE
+    } else if page_index.is_some() {
+        theme::TEXT
+    } else {
+        theme::TEXT_MUTED
+    };
+    let label = format_bookmark_label(title, depth, page_index);
+    ui.add_enabled(
+        page_index.is_some(),
+        egui::Button::new(egui::RichText::new(label).color(text).size(13.0))
+            .selected(selected)
+            .fill(fill)
+            .stroke(egui::Stroke::new(1.0, theme::STROKE))
+            .corner_radius(egui::CornerRadius::same(6))
+            .min_size(egui::vec2(ui.available_width(), 28.0)),
+    )
+}
+
+fn format_bookmark_label(title: &str, depth: usize, page_index: Option<usize>) -> String {
+    let page = page_index
+        .map(|index| format!("  {}", index + 1))
+        .unwrap_or_default();
+    format!("{}{}{}", "  ".repeat(depth.min(5)), title, page)
 }
 
 fn empty_sidebar_note(ui: &mut egui::Ui, note: &str) {
@@ -952,6 +1070,19 @@ mod tests {
     fn format_page_counter_uses_one_based_pages() {
         assert_eq!(format_page_counter(0, 12), "Page 1 / 12");
         assert_eq!(format_page_counter(11, 12), "Page 12 / 12");
+    }
+
+    #[test]
+    fn format_bookmark_label_indents_and_uses_one_based_page() {
+        assert_eq!(format_bookmark_label("Plan", 0, Some(0)), "Plan  1");
+        assert_eq!(
+            format_bookmark_label("Detail", 2, Some(11)),
+            "    Detail  12"
+        );
+        assert_eq!(
+            format_bookmark_label("Section", 8, None),
+            "          Section"
+        );
     }
 
     #[test]
