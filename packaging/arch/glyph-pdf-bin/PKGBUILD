@@ -1,6 +1,6 @@
 # Maintainer: dansc89
 pkgname=glyph-pdf-bin
-pkgver=1.0.9
+pkgver=1.0.10
 pkgrel=1
 pkgdesc="PDF editor for Arch Linux"
 arch=('x86_64')
