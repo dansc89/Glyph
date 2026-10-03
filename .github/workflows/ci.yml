@@ -20,6 +20,8 @@ jobs:
           cargo install cargo-deb --locked
       - name: Check formatting
         run: cargo fmt --all -- --check
+      - name: Reset Pdfium bundled cache
+        run: rm -rf ~/.cache/pdfium-bundled
       - name: Test
         run: cargo test --locked
       - name: Build release
