@@ -1,6 +1,6 @@
 # Glyph
 
-Glyph is a native Linux PDF editor for drawing sets, inspired by Drawbridge but built as a Linux-first application.
+Glyph is a native Linux PDF editor for drawing sets and technical documents.
 
 Target feel: clean, fast, dark, keyboard-friendly, at home on Omarchy.
 
@@ -71,13 +71,13 @@ That extracts the AppImage payload into your user profile and installs a normal 
 
 An Arch-friendly source package recipe lives at `packaging/arch/PKGBUILD` for later AUR packaging.
 
-## Drawbridge parity
+## Product roadmap
 
-The living parity checklist is in [`docs/drawbridge-parity.md`](docs/drawbridge-parity.md).
+The living usability and feature roadmap is in [`docs/product-roadmap.md`](docs/product-roadmap.md).
 
 ## Releases
 
-Public releases now use the simple Drawbridge-polish train: `1.0`, `1.1`, `1.2`, `1.3`, ... even for small incremental updates. See [`docs/release-policy.md`](docs/release-policy.md).
+Public releases use a simple numbered train: `1.0`, `1.1`, `1.2`, `1.3`, ... even for small incremental updates. See [`docs/release-policy.md`](docs/release-policy.md).
 
 ## Build locally
 

@@ -1,6 +1,6 @@
-# Drawbridge → Glyph parity checklist
+# Glyph product roadmap
 
-Glyph is a Linux/Rust sister app, not a direct AppKit/PDFKit port. This checklist maps the Mac Drawbridge feature surface into native Glyph work.
+Glyph is a standalone native Linux PDF workspace for drawing sets and technical documents.
 
 ## Implemented in Glyph
 
@@ -12,37 +12,44 @@ Glyph is a Linux/Rust sister app, not a direct AppKit/PDFKit port. This checklis
 - Omarchy-friendly AppImage/tar.gz path plus `.deb` and Arch `PKGBUILD` starter.
 - PDF outline/bookmark extraction and sidebar jump targets.
 
-## Next parity slices
+## Next usability slices
 
-### 1. Drawing-set navigation
+### 1. Viewer performance and feel
+
+- Replace whole-page raster zoom with a tiled or retained-resolution rendering path.
+- Keep pan/scroll interaction responsive while high-resolution page tiles render in the background.
+- Cache nearby pages and visible zoom levels.
+- Add clearer loading/progress states for large sheets.
+
+### 2. Drawing-set navigation
 
 - Better page labels from PDF page-label dictionaries.
 - Sheet ID extraction/normalization from page text and titles.
 - Searchable sheet list with thumbnails.
 - Recent files and last-viewed page/zoom state.
 
-### 2. Search
+### 3. Search
 
 - Full-document text search with hit list.
 - Per-page highlighted search hits.
 - Search history and keyboard flow.
 
-### 3. Links / AEC workflow
+### 4. Links / AEC workflow
 
 - Link overlay rendering on pages.
 - Detect internal PDF links and jump destinations.
-- Drawbridge-style sheet-to-sheet linking workflow.
+- Sheet-to-sheet linking workflow.
 - Create/edit/remove link rectangles.
 - Export/save updated link annotations.
 
-### 4. Bookmarks / outlines
+### 5. Bookmarks / outlines
 
 - Preserve hierarchy and collapsed state.
 - Named destinations and action destinations, not just direct `/Dest` arrays.
 - Bookmark creation/editing/removal.
 - Export/save outline changes.
 
-### 5. PDF processing/export
+### 6. PDF processing/export
 
 - Combine PDFs/drawing sets.
 - Flatten annotations.
@@ -50,7 +57,7 @@ Glyph is a Linux/Rust sister app, not a direct AppKit/PDFKit port. This checklis
 - Image/JPEG-style export flow.
 - Verify exported PDFs by reopening and inspecting structure.
 
-### 6. Markup/editor tools
+### 7. Markup/editor tools
 
 - Select/pan modes.
 - Rect/ellipse/line/arrow/freehand/text tools.

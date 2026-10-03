@@ -28,4 +28,4 @@ Every numbered release should include:
 
 ## 1.x product direction
 
-The `1.x` train is not just version churn. Each release should move Glyph closer to Drawbridge-level polish: faster navigation, cleaner drawing-set workflow, better PDF search/linking, safer save/export behavior, and a calmer Omarchy-native user experience.
+The `1.x` train is not just version churn. Each release should make Glyph faster, cleaner, safer, and more useful for real drawing-set review: responsive navigation, a stronger drawing-set workflow, better PDF search/linking, safer save/export behavior, and a calmer Omarchy-native user experience.

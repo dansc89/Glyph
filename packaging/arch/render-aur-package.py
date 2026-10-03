@@ -24,7 +24,7 @@ DEPENDS = [
     "libxrandr",
 ]
 
-PKGDESC = "Native Linux PDF drawing-set editor inspired by Drawbridge"
+PKGDESC = "Native Linux PDF drawing-set editor"
 URL = "https://github.com/dansc89/Glyph"
 PKGNAME = "glyph-pdf-bin"
 SOURCE_URL = "https://github.com/dansc89/Glyph/releases/download/{version}/glyph-omarchy-x86_64.tar.gz"

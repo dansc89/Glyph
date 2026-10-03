@@ -1,5 +1,5 @@
 pkgbase = glyph-pdf-bin
-	pkgdesc = Native Linux PDF drawing-set editor inspired by Drawbridge
+	pkgdesc = Native Linux PDF drawing-set editor
 	pkgver = 1.0.8
 	pkgrel = 1
 	url = https://github.com/dansc89/Glyph
