@@ -22,6 +22,6 @@ pkgbase = glyph-pdf-bin
 	provides = glyph-pdf
 	conflicts = glyph-pdf
 	source = https://github.com/dansc89/Glyph/releases/download/1.0.10/glyph-arch-x86_64.tar.gz
-	sha256sums = ad56285f18be0527e3f71309febce540a4f7e7a6e82a9ea037a0a4d022d260e5
+	sha256sums = 2c7dcba836cf605084b59a8acf71db4a2ce866e7a1d6cafa476b4436393fb1c4
 
 pkgname = glyph-pdf-bin
