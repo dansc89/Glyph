@@ -2,7 +2,7 @@
 set -eu
 
 REPO="${GLYPH_REPO:-dansc89/Glyph}"
-TAG="${GLYPH_VERSION:-1.0.10}"
+TAG="${GLYPH_VERSION:-1.0.11}"
 ASSET="glyph-arch-x86_64.tar.gz"
 BASE_URL="https://github.com/${REPO}/releases/download/${TAG}"
 INSTALL_DIR="${GLYPH_INSTALL_DIR:-$HOME/.local/bin}"
