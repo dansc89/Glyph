@@ -1,8 +1,8 @@
 [package]
 name = "glyph"
-version = "1.0.8"
+version = "1.0.9"
 edition = "2024"
-description = "A native, fast Linux PDF editor for drawing-set navigation and linking."
+description = "PDF editor for Arch Linux."
 license = "MIT"
 repository = "https://github.com/dansc89/Glyph"
 
@@ -23,7 +23,7 @@ tempfile = "3.23"
 [package.metadata.deb]
 maintainer = "dansc89"
 copyright = "2026, dansc89"
-extended-description = "Glyph is a native Linux PDF editor for drawing-set navigation, bookmarks, and link workflows."
+extended-description = "Glyph is a PDF editor for Arch Linux with drawing-set navigation, bookmarks, and link workflows."
 section = "graphics"
 priority = "optional"
 assets = [

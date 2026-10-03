@@ -24,10 +24,10 @@ DEPENDS = [
     "libxrandr",
 ]
 
-PKGDESC = "Native Linux PDF drawing-set editor"
+PKGDESC = "PDF editor for Arch Linux"
 URL = "https://github.com/dansc89/Glyph"
 PKGNAME = "glyph-pdf-bin"
-SOURCE_URL = "https://github.com/dansc89/Glyph/releases/download/{version}/glyph-omarchy-x86_64.tar.gz"
+SOURCE_URL = "https://github.com/dansc89/Glyph/releases/download/{version}/glyph-arch-x86_64.tar.gz"
 
 
 def validate_version(version: str) -> str:
@@ -55,11 +55,11 @@ license=('MIT')
 depends=({depends})
 provides=('glyph-pdf')
 conflicts=('glyph-pdf')
-source=("https://github.com/dansc89/Glyph/releases/download/${{pkgver}}/glyph-omarchy-x86_64.tar.gz")
+source=("https://github.com/dansc89/Glyph/releases/download/${{pkgver}}/glyph-arch-x86_64.tar.gz")
 sha256sums=('{sha256}')
 
 package() {{
-  cd "${{srcdir}}/glyph-omarchy-x86_64"
+  cd "${{srcdir}}/glyph-arch-x86_64"
   install -Dm755 glyph "${{pkgdir}}/usr/lib/glyph/glyph-bin"
   install -Dm755 /dev/stdin "${{pkgdir}}/usr/bin/glyph" <<'EOF'
 #!/usr/bin/env sh

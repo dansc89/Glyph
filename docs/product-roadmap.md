@@ -1,6 +1,6 @@
 # Glyph product roadmap
 
-Glyph is a standalone native Linux PDF workspace for drawing sets and technical documents.
+Glyph is a standalone PDF editor for Arch Linux.
 
 ## Implemented in Glyph
 
@@ -9,7 +9,7 @@ Glyph is a standalone native Linux PDF workspace for drawing sets and technical 
 - PDFium page rendering with real-PDF render smoke test.
 - Page sidebar, previous/next navigation, Home/End, arrow/page-key navigation.
 - Zoom, reset, fit-page, drag panning.
-- Omarchy-friendly AppImage/tar.gz path plus `.deb` and Arch `PKGBUILD` starter.
+- Arch-friendly AppImage/tar.gz path plus `.deb` and Arch `PKGBUILD` starter.
 - PDF outline/bookmark extraction and sidebar jump targets.
 
 ## Next usability slices
@@ -73,4 +73,4 @@ Glyph is a standalone native Linux PDF workspace for drawing sets and technical 
 - Local tests for core PDF/document logic.
 - CI-built x86_64 AppImage, `.deb`, and tar.gz before telling user to install.
 - Release assets downloaded back and SHA256 verified before claiming release readiness.
-- Actual Omarchy visual testing remains required on an x86_64 desktop.
+- Actual Arch Linux visual testing remains required on an x86_64 desktop.

@@ -1,12 +1,12 @@
 # Glyph
 
-Glyph is a native Linux PDF editor for drawing sets and technical documents.
+Glyph is a PDF editor for Arch Linux.
 
-Target feel: clean, fast, dark, keyboard-friendly, at home on Omarchy.
+Target feel: clean, fast, dark, keyboard-friendly, and native.
 
 ## Architecture
 
-Glyph is **not** a web wrapper and is **not** a direct Swift/AppKit/PDFKit port.
+Glyph is **not** a web wrapper. It is a native Rust desktop app.
 
 - UI: Rust native immediate-mode shell with `egui`/`wgpu`
 - PDF inspection/write path: Rust + `lopdf` first, `qpdf` integration later for hard PDF rewrites
@@ -24,12 +24,12 @@ Glyph is **not** a web wrapper and is **not** a direct Swift/AppKit/PDFKit port.
 - Keyboard shortcuts: Ctrl+O, Arrow/Page keys, Home/End
 - Dark native shell
 
-## Install on Omarchy / Arch Linux
+## Install on Arch Linux
 
 Easiest path today:
 
 ```bash
-curl -fsSL https://github.com/dansc89/Glyph/releases/download/1.0.8/install-glyph-omarchy.sh | sh
+curl -fsSL https://github.com/dansc89/Glyph/releases/download/1.0.9/install-glyph-arch.sh | sh
 glyph
 ```
 
@@ -42,11 +42,11 @@ AUR-style package recipes are included under `packaging/arch/`:
 
 The plain `glyph` and `glyph-bin` AUR names are already taken by an unrelated ASCII-art project, so this app uses the clearer `glyph-pdf-*` package naming path.
 
-Manual path: download `glyph-omarchy-x86_64.tar.gz` from the release, then run:
+Manual path: download `glyph-arch-x86_64.tar.gz` from the release, then run:
 
 ```bash
-tar -xzf glyph-omarchy-x86_64.tar.gz
-cd glyph-omarchy-x86_64
+tar -xzf glyph-arch-x86_64.tar.gz
+cd glyph-arch-x86_64
 ./install-glyph.sh
 glyph
 ```
@@ -67,7 +67,7 @@ If you only have the AppImage and your system does not have AppImage/FUSE suppor
 glyph
 ```
 
-That extracts the AppImage payload into your user profile and installs a normal detached `glyph` launcher, so runtime launch does not depend on FUSE or keeping a Terminal window open. See [`docs/omarchy-install.md`](docs/omarchy-install.md) for the release packaging guarantee.
+That extracts the AppImage payload into your user profile and installs a normal detached `glyph` launcher, so runtime launch does not depend on FUSE or keeping a Terminal window open. See [`docs/arch-linux-install.md`](docs/arch-linux-install.md) for the release packaging guarantee.
 
 An Arch-friendly source package recipe lives at `packaging/arch/PKGBUILD` for later AUR packaging.
 

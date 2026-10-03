@@ -17,7 +17,7 @@ No public `0.x`, `alpha`, `beta`, `rc`, or patch-style release names for normal 
 
 Every numbered release should include:
 
-- Omarchy-first `glyph-omarchy-x86_64.tar.gz`.
+- Arch-first `glyph-arch-x86_64.tar.gz`.
 - `Glyph-x86_64.AppImage` as alternate portable artifact.
 - `install-glyph-appimage.sh` for no-FUSE AppImage extraction installs.
 - `glyph-x86_64.deb`.
@@ -28,4 +28,4 @@ Every numbered release should include:
 
 ## 1.x product direction
 
-The `1.x` train is not just version churn. Each release should make Glyph faster, cleaner, safer, and more useful for real drawing-set review: responsive navigation, a stronger drawing-set workflow, better PDF search/linking, safer save/export behavior, and a calmer Omarchy-native user experience.
+The `1.x` train is not just version churn. Each release should make Glyph faster, cleaner, safer, and more useful for real drawing-set review: responsive navigation, a stronger drawing-set workflow, better PDF search/linking, safer save/export behavior, and a calmer Arch-native user experience.

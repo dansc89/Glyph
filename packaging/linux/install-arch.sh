@@ -2,8 +2,8 @@
 set -eu
 
 REPO="${GLYPH_REPO:-dansc89/Glyph}"
-TAG="${GLYPH_VERSION:-1.0.8}"
-ASSET="glyph-omarchy-x86_64.tar.gz"
+TAG="${GLYPH_VERSION:-1.0.9}"
+ASSET="glyph-arch-x86_64.tar.gz"
 BASE_URL="https://github.com/${REPO}/releases/download/${TAG}"
 INSTALL_DIR="${GLYPH_INSTALL_DIR:-$HOME/.local/bin}"
 
@@ -53,7 +53,7 @@ fi
 
 echo "Installing Glyph..."
 tar -xzf "$ASSET"
-cd glyph-omarchy-x86_64
+cd glyph-arch-x86_64
 sh ./install-glyph.sh
 
 if command_exists update-desktop-database; then

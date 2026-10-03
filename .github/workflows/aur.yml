@@ -44,11 +44,11 @@ jobs:
         run: |
           set -euo pipefail
           version="${{ steps.release.outputs.version }}"
-          url="https://github.com/dansc89/Glyph/releases/download/${version}/glyph-omarchy-x86_64.tar.gz"
-          curl -fsSL "$url" -o glyph-omarchy-x86_64.tar.gz
-          sha256="$(sha256sum glyph-omarchy-x86_64.tar.gz | awk '{print $1}')"
+          url="https://github.com/dansc89/Glyph/releases/download/${version}/glyph-arch-x86_64.tar.gz"
+          curl -fsSL "$url" -o glyph-arch-x86_64.tar.gz
+          sha256="$(sha256sum glyph-arch-x86_64.tar.gz | awk '{print $1}')"
           echo "sha256=$sha256" >> "$GITHUB_OUTPUT"
-          tar -tzf glyph-omarchy-x86_64.tar.gz >/dev/null
+          tar -tzf glyph-arch-x86_64.tar.gz >/dev/null
 
       - name: Render AUR package files
         shell: bash

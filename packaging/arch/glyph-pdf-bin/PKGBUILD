@@ -1,19 +1,19 @@
 # Maintainer: dansc89
 pkgname=glyph-pdf-bin
-pkgver=1.0.8
+pkgver=1.0.9
 pkgrel=1
-pkgdesc="Native Linux PDF drawing-set editor"
+pkgdesc="PDF editor for Arch Linux"
 arch=('x86_64')
 url="https://github.com/dansc89/Glyph"
 license=('MIT')
 depends=('gcc-libs' 'glibc' 'fontconfig' 'mesa' 'vulkan-icd-loader' 'wayland' 'libx11' 'libxcb' 'libxcursor' 'libxi' 'libxinerama' 'libxkbcommon' 'libxkbcommon-x11' 'libxrandr')
 provides=('glyph-pdf')
 conflicts=('glyph-pdf')
-source=("https://github.com/dansc89/Glyph/releases/download/${pkgver}/glyph-omarchy-x86_64.tar.gz")
-sha256sums=('742ae291920e2f592d5481f4d8aa9305b981e3611451ef26dbce274e97a1e20f')
+source=("https://github.com/dansc89/Glyph/releases/download/${pkgver}/glyph-arch-x86_64.tar.gz")
+sha256sums=('SKIP')
 
 package() {
-  cd "${srcdir}/glyph-omarchy-x86_64"
+  cd "${srcdir}/glyph-arch-x86_64"
   install -Dm755 glyph "${pkgdir}/usr/lib/glyph/glyph-bin"
   install -Dm755 /dev/stdin "${pkgdir}/usr/bin/glyph" <<'EOF'
 #!/usr/bin/env sh
