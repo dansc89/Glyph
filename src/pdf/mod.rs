@@ -190,7 +190,7 @@ fn walk_outline_siblings(
         if let Some(title) = item.get(b"Title").ok().and_then(pdf_string_to_utf8) {
             bookmarks.push(PdfBookmark {
                 title,
-                page_index: outline_target_page(item.get(b"Dest").ok(), page_index_by_id),
+                page_index: outline_item_target_page(doc, item, page_index_by_id),
                 depth,
             });
         }
@@ -203,6 +203,20 @@ fn walk_outline_siblings(
     }
 }
 
+fn outline_item_target_page(
+    doc: &Document,
+    item: &lopdf::Dictionary,
+    page_index_by_id: &HashMap<ObjectId, usize>,
+) -> Option<usize> {
+    if let Some(page_index) = outline_target_page(item.get(b"Dest").ok(), page_index_by_id) {
+        return Some(page_index);
+    }
+
+    let action = item.get(b"A").ok().and_then(resolve_dict_object(doc));
+    let dest = action.and_then(|action| action.get(b"D").ok());
+    outline_target_page(dest, page_index_by_id)
+}
+
 fn outline_target_page(
     dest: Option<&Object>,
     page_index_by_id: &HashMap<ObjectId, usize>,
@@ -211,9 +225,27 @@ fn outline_target_page(
     match dest {
         Object::Array(items) => items
             .first()
-            .and_then(|item| item.as_reference().ok())
+            .and_then(|item| page_object_id(item))
             .and_then(|page_id| page_index_by_id.get(&page_id).copied()),
         Object::Reference(page_id) => page_index_by_id.get(page_id).copied(),
+        _ => None,
+    }
+}
+
+fn page_object_id(object: &Object) -> Option<ObjectId> {
+    match object {
+        Object::Reference(page_id) => Some(*page_id),
+        Object::Dictionary(dict) => dict.get(b"Parent").ok().and_then(|_| None),
+        _ => None,
+    }
+}
+
+fn resolve_dict_object<'a>(
+    doc: &'a Document,
+) -> impl Fn(&'a Object) -> Option<&'a lopdf::Dictionary> {
+    move |object| match object {
+        Object::Dictionary(dict) => Some(dict),
+        Object::Reference(id) => doc.get_object(*id).and_then(Object::as_dict).ok(),
         _ => None,
     }
 }
@@ -475,6 +507,20 @@ mod tests {
         assert_eq!(summary.bookmarks[0].depth, 0);
     }
 
+    #[test]
+    fn inspection_extracts_action_bookmark_destinations() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("glyph-action-outline.pdf");
+        std::fs::write(&path, minimal_pdf_with_action_outline_bytes()).unwrap();
+
+        let summary = LopdfInspectionEngine.inspect(&path).unwrap();
+
+        assert_eq!(summary.page_count, 1);
+        assert_eq!(summary.bookmarks.len(), 1);
+        assert_eq!(summary.bookmarks[0].title, "A-102 Enlarged Plan");
+        assert_eq!(summary.bookmarks[0].page_index, Some(0));
+    }
+
     fn minimal_pdf_bytes() -> Vec<u8> {
         let objects = [
             "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
@@ -496,6 +542,33 @@ mod tests {
         }
         pdf.push_str(&format!(
             "trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n"
+        ));
+        pdf.into_bytes()
+    }
+
+    fn minimal_pdf_with_action_outline_bytes() -> Vec<u8> {
+        let objects = [
+            "1 0 obj\n<< /Type /Catalog /Pages 2 0 R /Outlines 6 0 R >>\nendobj\n",
+            "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n",
+            "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>\nendobj\n",
+            "4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n",
+            "5 0 obj\n<< /Length 41 >>\nstream\nBT /F1 24 Tf 50 110 Td (Glyph) Tj ET\nendstream\nendobj\n",
+            "6 0 obj\n<< /Type /Outlines /First 7 0 R /Last 7 0 R /Count 1 >>\nendobj\n",
+            "7 0 obj\n<< /Title (A-102 Enlarged Plan) /Parent 6 0 R /A << /S /GoTo /D [3 0 R /XYZ null null null] >> >>\nendobj\n",
+        ];
+        let mut pdf = String::from("%PDF-1.4\n");
+        let mut offsets = vec![0usize];
+        for object in objects {
+            offsets.push(pdf.len());
+            pdf.push_str(object);
+        }
+        let xref_offset = pdf.len();
+        pdf.push_str("xref\n0 8\n0000000000 65535 f \n");
+        for offset in offsets.iter().skip(1) {
+            pdf.push_str(&format!("{offset:010} 00000 n \n"));
+        }
+        pdf.push_str(&format!(
+            "trailer\n<< /Size 8 /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n"
         ));
         pdf.into_bytes()
     }

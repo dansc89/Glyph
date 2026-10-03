@@ -182,15 +182,15 @@ def main() -> int:
         shots.append(capture(ffmpeg, "03-click-page-3", out_dir))
 
         # Exercise the Pages | Bookmarks navigation tabs and bookmark jump.
-        run([xdotool, "mousemove", "205", "188", "click", "1"], env=env)
+        run([xdotool, "mousemove", "205", "70", "click", "1"], env=env)
         time.sleep(1.0)
         shots.append(capture(ffmpeg, "04-bookmarks-tab", out_dir))
 
-        run([xdotool, "mousemove", "75", "262", "click", "1"], env=env)
+        run([xdotool, "mousemove", "75", "105", "click", "1"], env=env)
         time.sleep(1.0)
         shots.append(capture(ffmpeg, "05-bookmark-page-2", out_dir))
 
-        run([xdotool, "mousemove", "55", "222", "click", "1"], env=env)
+        run([xdotool, "mousemove", "55", "70", "click", "1"], env=env)
         time.sleep(0.5)
 
         # Cursor-anchored zoom in the document canvas.
@@ -203,10 +203,10 @@ def main() -> int:
         time.sleep(1.5)
         shots.append(capture(ffmpeg, "07-high-zoom-tile", out_dir))
 
-        # Drag pan on the canvas.
-        run([xdotool, "mousemove", "800", "500", "mousedown", "1", "mousemove_relative", "--sync", "160", "70", "mouseup", "1"], env=env)
+        # Middle-button drag pan on the canvas. This matches CAD/PDF-reviewer hand-panning.
+        run([xdotool, "mousemove", "800", "500", "mousedown", "2", "mousemove_relative", "--sync", "160", "70", "mouseup", "2"], env=env)
         time.sleep(1.0)
-        shots.append(capture(ffmpeg, "08-drag-pan", out_dir))
+        shots.append(capture(ffmpeg, "08-middle-drag-pan", out_dir))
 
         summary = out_dir / "summary.txt"
         summary.write_text(
