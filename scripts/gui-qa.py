@@ -182,10 +182,15 @@ def main() -> int:
         time.sleep(1.0)
         shots.append(capture(ffmpeg, "04-zoom-at-cursor", out_dir))
 
+        # Push past the high-resolution tile threshold and verify the zoomed viewport path.
+        run([xdotool, "mousemove", "800", "500", "click", "4", "click", "4", "click", "4", "click", "4", "click", "4"], env=env)
+        time.sleep(1.5)
+        shots.append(capture(ffmpeg, "05-high-zoom-tile", out_dir))
+
         # Drag pan on the canvas.
         run([xdotool, "mousemove", "800", "500", "mousedown", "1", "mousemove_relative", "--sync", "160", "70", "mouseup", "1"], env=env)
         time.sleep(1.0)
-        shots.append(capture(ffmpeg, "05-drag-pan", out_dir))
+        shots.append(capture(ffmpeg, "06-drag-pan", out_dir))
 
         summary = out_dir / "summary.txt"
         summary.write_text(

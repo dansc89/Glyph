@@ -1,5 +1,7 @@
 use lopdf::{Document, Object, ObjectId};
-use pdfium_bundled::pdfium_render::prelude::{PdfRenderConfig, Pdfium, PdfiumError};
+use pdfium_bundled::pdfium_render::prelude::{
+    PdfBitmap, PdfBitmapFormat, PdfRenderConfig, Pdfium, PdfiumError,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
@@ -50,8 +52,51 @@ pub struct RenderedPage {
 
 impl RenderedPage {
     pub fn is_valid_rgba_buffer(&self) -> bool {
-        self.width > 0 && self.height > 0 && self.rgba.len() == self.width * self.height * 4
+        valid_rgba_buffer(self.width, self.height, self.rgba.len())
     }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RenderedTile {
+    pub page_index: usize,
+    pub full_width: usize,
+    pub full_height: usize,
+    pub x: usize,
+    pub y: usize,
+    pub width: usize,
+    pub height: usize,
+    pub rgba: Vec<u8>,
+}
+
+impl RenderedTile {
+    pub fn is_valid_rgba_buffer(&self) -> bool {
+        valid_rgba_buffer(self.width, self.height, self.rgba.len())
+    }
+
+    pub fn contains(&self, other: &TileRequest) -> bool {
+        self.page_index == other.page_index
+            && self.full_width == other.full_width
+            && self.full_height == other.full_height
+            && self.x <= other.x
+            && self.y <= other.y
+            && self.x + self.width >= other.x + other.width
+            && self.y + self.height >= other.y + other.height
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TileRequest {
+    pub page_index: usize,
+    pub full_width: usize,
+    pub full_height: usize,
+    pub x: usize,
+    pub y: usize,
+    pub width: usize,
+    pub height: usize,
+}
+
+fn valid_rgba_buffer(width: usize, height: usize, byte_len: usize) -> bool {
+    width > 0 && height > 0 && byte_len == width * height * 4
 }
 
 pub trait PdfEngine {
@@ -177,6 +222,65 @@ fn pdf_string_to_utf8(object: &Object) -> Option<String> {
     let bytes = object.as_str().ok()?;
     let title = String::from_utf8_lossy(bytes).trim().to_owned();
     (!title.is_empty()).then_some(title)
+}
+
+impl PdfiumRenderEngine {
+    pub fn render_tile(&self, path: &Path, request: TileRequest) -> Result<RenderedTile, PdfError> {
+        validate_pdf_path(path)?;
+        if request.width == 0 || request.height == 0 {
+            return Err(PdfError::Render(
+                "tile request has empty dimensions".to_owned(),
+            ));
+        }
+        let pdfium = bind_bundled_pdfium()?;
+        let document = pdfium
+            .load_pdf_from_file(path, None)
+            .map_err(map_pdfium_load_error)?;
+        let pages = document.pages();
+        if request.page_index >= pages.len() as usize {
+            return Err(PdfError::Render(format!(
+                "page {} is outside document page count {}",
+                request.page_index + 1,
+                pages.len()
+            )));
+        }
+        let page = pages
+            .get(request.page_index as i32)
+            .map_err(|err| PdfError::Render(err.to_string()))?;
+        let mut bitmap = PdfBitmap::empty(
+            request.width as i32,
+            request.height as i32,
+            PdfBitmapFormat::BGRA,
+        )
+        .map_err(|err| PdfError::Render(err.to_string()))?;
+        let render_config = PdfRenderConfig::new()
+            .set_target_width(request.full_width as i32)
+            .set_maximum_height(request.full_height as i32)
+            .set_origin(-(request.x as i32), -(request.y as i32))
+            .render_form_data(true)
+            .render_annotations(true);
+        page.render_into_bitmap_with_config(&mut bitmap, &render_config)
+            .map_err(|err| PdfError::Render(err.to_string()))?;
+        let rendered = RenderedTile {
+            page_index: request.page_index,
+            full_width: request.full_width,
+            full_height: request.full_height,
+            x: request.x,
+            y: request.y,
+            width: bitmap.width() as usize,
+            height: bitmap.height() as usize,
+            rgba: bitmap.as_rgba_bytes(),
+        };
+        if !rendered.is_valid_rgba_buffer() {
+            return Err(PdfError::Render(format!(
+                "renderer returned invalid tile RGBA buffer: {}x{} with {} bytes",
+                rendered.width,
+                rendered.height,
+                rendered.rgba.len()
+            )));
+        }
+        Ok(rendered)
+    }
 }
 
 impl PdfRenderEngine for PdfiumRenderEngine {
@@ -320,6 +424,37 @@ mod tests {
         assert!(
             rendered
                 .rgba
+                .chunks_exact(4)
+                .any(|pixel| pixel != [255, 255, 255, 255])
+        );
+    }
+
+    #[test]
+    fn pdfium_renders_viewport_tile_at_high_resolution() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("glyph-tile.pdf");
+        std::fs::write(&path, minimal_pdf_bytes()).unwrap();
+
+        let request = TileRequest {
+            page_index: 0,
+            full_width: 3_200,
+            full_height: 3_200,
+            x: 500,
+            y: 1_400,
+            width: 512,
+            height: 512,
+        };
+        let tile = PdfiumRenderEngine.render_tile(&path, request).unwrap();
+
+        assert_eq!(tile.page_index, 0);
+        assert_eq!(tile.full_width, 3_200);
+        assert_eq!(tile.full_height, 3_200);
+        assert_eq!(tile.x, 500);
+        assert_eq!(tile.y, 1_400);
+        assert!(tile.is_valid_rgba_buffer());
+        assert!(tile.contains(&request));
+        assert!(
+            tile.rgba
                 .chunks_exact(4)
                 .any(|pixel| pixel != [255, 255, 255, 255])
         );

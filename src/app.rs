@@ -1,6 +1,7 @@
 use crate::core::project::ProjectState;
 use crate::pdf::{
     LopdfInspectionEngine, PdfEngine, PdfRenderEngine, PdfiumRenderEngine, RenderedPage,
+    RenderedTile, TileRequest,
 };
 use crate::theme;
 use eframe::egui;
@@ -11,6 +12,10 @@ const BASE_RENDER_WIDTH: u16 = 1800;
 const MAX_RENDER_WIDTH: u16 = 8192;
 const RERENDER_UPSCALE_THRESHOLD: f32 = 1.15;
 const ZOOM_RERENDER_IDLE: Duration = Duration::from_millis(180);
+const TILE_RENDER_TRIGGER_ZOOM: f32 = 2.0;
+const TILE_RENDER_MAX_EDGE: usize = 4096;
+const TILE_RENDER_MARGIN: f32 = 0.18;
+const MAX_TILE_FULL_WIDTH: usize = 32_768;
 const MIN_ZOOM: f32 = 0.1;
 const MAX_ZOOM: f32 = 8.0;
 
@@ -24,6 +29,8 @@ pub struct GlyphApp {
     renderer: PdfiumRenderEngine,
     rendered_page: Option<RenderedPage>,
     page_texture: Option<egui::TextureHandle>,
+    rendered_tile: Option<RenderedTile>,
+    tile_texture: Option<egui::TextureHandle>,
     page_aspect_ratio: Option<f32>,
     fit_to_page_requested: bool,
     last_canvas_pointer: Option<egui::Pos2>,
@@ -43,6 +50,8 @@ impl GlyphApp {
             renderer: PdfiumRenderEngine,
             rendered_page: None,
             page_texture: None,
+            rendered_tile: None,
+            tile_texture: None,
             page_aspect_ratio: None,
             fit_to_page_requested: false,
             last_canvas_pointer: None,
@@ -83,6 +92,8 @@ impl GlyphApp {
                 self.pan = egui::Vec2::ZERO;
                 self.rendered_page = None;
                 self.page_texture = None;
+                self.rendered_tile = None;
+                self.tile_texture = None;
                 self.page_aspect_ratio = None;
                 self.last_zoom_change = None;
                 self.status = format!("Loaded {}", path.display());
@@ -135,6 +146,28 @@ impl GlyphApp {
         );
         self.rendered_page = Some(rendered);
         self.page_texture = Some(texture);
+        self.rendered_tile = None;
+        self.tile_texture = None;
+    }
+
+    fn install_tile_texture(&mut self, ctx: &egui::Context, tile: RenderedTile) {
+        let image = egui::ColorImage::from_rgba_unmultiplied([tile.width, tile.height], &tile.rgba);
+        let texture = ctx.load_texture(
+            format!(
+                "glyph-page-{}-tile-{}x{}-{}-{}-{}x{}",
+                tile.page_index,
+                tile.full_width,
+                tile.full_height,
+                tile.x,
+                tile.y,
+                tile.width,
+                tile.height
+            ),
+            image,
+            egui::TextureOptions::LINEAR,
+        );
+        self.rendered_tile = Some(tile);
+        self.tile_texture = Some(texture);
     }
 
     fn page_count(&self) -> Option<usize> {
@@ -178,6 +211,8 @@ impl GlyphApp {
             self.zoom = 1.0;
             self.pan = egui::Vec2::ZERO;
             self.page_aspect_ratio = None;
+            self.rendered_tile = None;
+            self.tile_texture = None;
             self.render_selected_page(ctx, BASE_RENDER_WIDTH);
         }
     }
@@ -237,6 +272,60 @@ impl GlyphApp {
 
         self.render_selected_page(ctx, desired_width);
         self.last_zoom_change = None;
+    }
+
+    fn ensure_visible_tile(
+        &mut self,
+        ctx: &egui::Context,
+        viewport: egui::Rect,
+        page_rect: egui::Rect,
+    ) {
+        if self.zoom < TILE_RENDER_TRIGGER_ZOOM {
+            self.rendered_tile = None;
+            self.tile_texture = None;
+            return;
+        }
+        if let Some(last_zoom_change) = self.last_zoom_change {
+            let elapsed = last_zoom_change.elapsed();
+            if elapsed < ZOOM_RERENDER_IDLE {
+                ctx.request_repaint_after(ZOOM_RERENDER_IDLE - elapsed);
+                return;
+            }
+        }
+        let Some(document) = &self.project.document else {
+            return;
+        };
+        let Some(request) = visible_tile_request(
+            self.project.selected_page,
+            self.page_aspect_ratio,
+            self.zoom,
+            ctx.pixels_per_point(),
+            viewport,
+            page_rect,
+        ) else {
+            return;
+        };
+        if self
+            .rendered_tile
+            .as_ref()
+            .is_some_and(|tile| tile.contains(&request))
+        {
+            return;
+        }
+
+        match self.renderer.render_tile(&document.path, request) {
+            Ok(tile) => {
+                self.install_tile_texture(ctx, tile);
+                self.status = format!(
+                    "Rendered high-res viewport tile — page {} — {}%",
+                    self.project.selected_page + 1,
+                    (self.zoom * 100.0).round() as i32
+                );
+            }
+            Err(err) => {
+                self.status = format!("High-res tile render failed: {err}");
+            }
+        }
     }
 
     fn reset_view(&mut self) {
@@ -541,8 +630,11 @@ impl eframe::App for GlyphApp {
                 let painter = ui.painter_at(rect);
                 draw_canvas_backdrop(&painter, rect);
 
-                if let (Some(rendered), Some(texture)) = (&self.rendered_page, &self.page_texture) {
+                if self.rendered_page.is_some() && self.page_texture.is_some() {
+                    let rendered = self.rendered_page.as_ref().unwrap();
                     let logical_size = self.logical_page_size(rendered);
+                    let page_index = rendered.page_index;
+                    let page_texture_id = self.page_texture.as_ref().unwrap().id();
                     let page_w = logical_size.x * self.zoom;
                     let page_h = logical_size.y * self.zoom;
                     let page_rect = egui::Rect::from_center_size(
@@ -559,12 +651,26 @@ impl eframe::App for GlyphApp {
                         8.0,
                         egui::Color32::from_rgb(226, 228, 232),
                     );
+                    self.ensure_visible_tile(ui.ctx(), rect, page_rect);
                     painter.image(
-                        texture.id(),
+                        page_texture_id,
                         page_rect,
                         egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
                         egui::Color32::WHITE,
                     );
+                    if let (Some(tile), Some(tile_texture)) =
+                        (&self.rendered_tile, &self.tile_texture)
+                    {
+                        if tile.page_index == page_index {
+                            let tile_rect = tile_screen_rect(tile, page_rect);
+                            painter.image(
+                                tile_texture.id(),
+                                tile_rect,
+                                egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+                                egui::Color32::WHITE,
+                            );
+                        }
+                    }
                     painter.rect_stroke(
                         page_rect,
                         6.0,
@@ -594,6 +700,88 @@ fn desired_render_width(zoom: f32, pixels_per_point: f32) -> u16 {
     width
         .round()
         .clamp(BASE_RENDER_WIDTH as f32, MAX_RENDER_WIDTH as f32) as u16
+}
+
+fn high_res_full_page_width(zoom: f32, pixels_per_point: f32) -> usize {
+    let width = BASE_RENDER_WIDTH as f32 * zoom.max(1.0) * pixels_per_point.max(1.0);
+    width
+        .round()
+        .clamp(MAX_RENDER_WIDTH as f32, MAX_TILE_FULL_WIDTH as f32) as usize
+}
+
+fn visible_tile_request(
+    page_index: usize,
+    page_aspect_ratio: Option<f32>,
+    zoom: f32,
+    pixels_per_point: f32,
+    viewport: egui::Rect,
+    page_rect: egui::Rect,
+) -> Option<TileRequest> {
+    let visible = page_rect.intersect(viewport);
+    if visible.width() <= 1.0
+        || visible.height() <= 1.0
+        || page_rect.width() <= 1.0
+        || page_rect.height() <= 1.0
+    {
+        return None;
+    }
+
+    let full_width = high_res_full_page_width(zoom, pixels_per_point);
+    let aspect_ratio =
+        page_aspect_ratio.unwrap_or_else(|| page_rect.height() / page_rect.width().max(1.0));
+    let full_height = ((full_width as f32 * aspect_ratio).round() as usize).max(1);
+
+    let x0 = ((visible.min.x - page_rect.min.x) / page_rect.width()).clamp(0.0, 1.0);
+    let y0 = ((visible.min.y - page_rect.min.y) / page_rect.height()).clamp(0.0, 1.0);
+    let x1 = ((visible.max.x - page_rect.min.x) / page_rect.width()).clamp(0.0, 1.0);
+    let y1 = ((visible.max.y - page_rect.min.y) / page_rect.height()).clamp(0.0, 1.0);
+
+    let mut x = (x0 * full_width as f32).floor() as isize;
+    let mut y = (y0 * full_height as f32).floor() as isize;
+    let mut right = (x1 * full_width as f32).ceil() as isize;
+    let mut bottom = (y1 * full_height as f32).ceil() as isize;
+    let margin = (((right - x).max(bottom - y) as f32) * TILE_RENDER_MARGIN).round() as isize;
+    let margin = margin.max(96);
+    x = (x - margin).max(0);
+    y = (y - margin).max(0);
+    right = (right + margin).min(full_width as isize);
+    bottom = (bottom + margin).min(full_height as isize);
+
+    let width = (right - x).max(1) as usize;
+    let height = (bottom - y).max(1) as usize;
+    let width = width
+        .min(TILE_RENDER_MAX_EDGE)
+        .min(full_width.saturating_sub(x as usize).max(1));
+    let height = height
+        .min(TILE_RENDER_MAX_EDGE)
+        .min(full_height.saturating_sub(y as usize).max(1));
+
+    Some(TileRequest {
+        page_index,
+        full_width,
+        full_height,
+        x: x as usize,
+        y: y as usize,
+        width,
+        height,
+    })
+}
+
+fn tile_screen_rect(tile: &RenderedTile, page_rect: egui::Rect) -> egui::Rect {
+    let x0 = tile.x as f32 / tile.full_width.max(1) as f32;
+    let y0 = tile.y as f32 / tile.full_height.max(1) as f32;
+    let x1 = (tile.x + tile.width) as f32 / tile.full_width.max(1) as f32;
+    let y1 = (tile.y + tile.height) as f32 / tile.full_height.max(1) as f32;
+    egui::Rect::from_min_max(
+        egui::pos2(
+            page_rect.min.x + x0 * page_rect.width(),
+            page_rect.min.y + y0 * page_rect.height(),
+        ),
+        egui::pos2(
+            page_rect.min.x + x1 * page_rect.width(),
+            page_rect.min.y + y1 * page_rect.height(),
+        ),
+    )
 }
 
 fn zoom_around_pointer(
