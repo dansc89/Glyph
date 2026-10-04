@@ -5,6 +5,7 @@ use crate::pdf::{
 };
 use crate::theme;
 use eframe::egui;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
@@ -18,6 +19,8 @@ const TILE_RENDER_TRIGGER_ZOOM: f32 = 2.0;
 const TILE_RENDER_MAX_EDGE: usize = 2048;
 const TILE_RENDER_MARGIN: f32 = 0.06;
 const MAX_TILE_FULL_WIDTH: usize = 32_768;
+const PAGE_CACHE_LIMIT: usize = 7;
+const PAGE_PREFETCH_RADIUS: usize = 2;
 const MIN_ZOOM: f32 = 0.1;
 const MAX_ZOOM: f32 = 8.0;
 
@@ -36,6 +39,8 @@ pub struct GlyphApp {
     renderer: PdfiumRenderEngine,
     rendered_page: Option<RenderedPage>,
     page_texture: Option<egui::TextureHandle>,
+    page_cache: HashMap<usize, RenderedPage>,
+    page_cache_order: VecDeque<usize>,
     rendered_tile: Option<RenderedTile>,
     tile_texture: Option<egui::TextureHandle>,
     page_aspect_ratio: Option<f32>,
@@ -47,6 +52,7 @@ pub struct GlyphApp {
     render_result_rx: mpsc::Receiver<RenderJobResult>,
     next_render_job_id: u64,
     pending_page_render: Option<PendingPageRender>,
+    pending_prefetch_pages: HashSet<usize>,
     pending_tile_render: Option<PendingTileRender>,
 }
 
@@ -79,6 +85,12 @@ enum RenderJobResult {
         request: TileRequest,
         result: Result<RenderedTile, PdfError>,
     },
+    PrefetchPage {
+        path: PathBuf,
+        page_index: usize,
+        target_width: u16,
+        result: Result<RenderedPage, PdfError>,
+    },
 }
 
 impl GlyphApp {
@@ -94,6 +106,8 @@ impl GlyphApp {
             renderer: PdfiumRenderEngine,
             rendered_page: None,
             page_texture: None,
+            page_cache: HashMap::new(),
+            page_cache_order: VecDeque::new(),
             rendered_tile: None,
             tile_texture: None,
             page_aspect_ratio: None,
@@ -105,6 +119,7 @@ impl GlyphApp {
             render_result_rx,
             next_render_job_id: 1,
             pending_page_render: None,
+            pending_prefetch_pages: HashSet::new(),
             pending_tile_render: None,
         };
         if let Some(path) = initial_pdf {
@@ -133,9 +148,12 @@ impl GlyphApp {
                 self.page_texture = None;
                 self.rendered_tile = None;
                 self.tile_texture = None;
+                self.page_cache.clear();
+                self.page_cache_order.clear();
                 self.page_aspect_ratio = None;
                 self.last_view_change = None;
                 self.pending_page_render = None;
+                self.pending_prefetch_pages.clear();
                 self.pending_tile_render = None;
                 self.status = format!("Loaded {}", path.display());
                 self.render_selected_page(ctx, BASE_RENDER_WIDTH);
@@ -152,6 +170,12 @@ impl GlyphApp {
         };
         let path = document.path.clone();
         let page_index = self.project.selected_page;
+        if let Some(cached) = self.cached_page(page_index, target_width) {
+            self.install_texture(ctx, cached);
+            self.status = format!("Page {} ready — cached", page_index + 1);
+            self.queue_adjacent_page_prefetch(ctx);
+            return;
+        }
         self.status = format!("Rendering page {}…", page_index + 1);
         self.queue_page_render(ctx, path, page_index, target_width);
     }
@@ -193,6 +217,79 @@ impl GlyphApp {
             });
             egui_ctx.request_repaint();
         });
+    }
+
+    fn cached_page(&self, page_index: usize, target_width: u16) -> Option<RenderedPage> {
+        self.page_cache.get(&page_index).and_then(|rendered| {
+            (rendered.width as f32 >= target_width as f32 * 0.95).then(|| rendered.clone())
+        })
+    }
+
+    fn cache_rendered_page(&mut self, rendered: RenderedPage) {
+        let page_index = rendered.page_index;
+        let should_replace = self
+            .page_cache
+            .get(&page_index)
+            .map(|cached| rendered.width >= cached.width)
+            .unwrap_or(true);
+        if !should_replace {
+            return;
+        }
+        if !self.page_cache.contains_key(&page_index) {
+            self.page_cache_order.push_back(page_index);
+        }
+        self.page_cache.insert(page_index, rendered);
+        while self.page_cache_order.len() > PAGE_CACHE_LIMIT {
+            if let Some(evicted) = self.page_cache_order.pop_front() {
+                if evicted != self.project.selected_page {
+                    self.page_cache.remove(&evicted);
+                }
+            }
+        }
+    }
+
+    fn queue_adjacent_page_prefetch(&mut self, ctx: &egui::Context) {
+        let Some(document) = &self.project.document else {
+            return;
+        };
+        let page_count = document.summary.page_count;
+        let selected_page = self.project.selected_page;
+        let start = selected_page.saturating_sub(PAGE_PREFETCH_RADIUS);
+        let end = (selected_page + PAGE_PREFETCH_RADIUS).min(page_count.saturating_sub(1));
+        let mut targets = Vec::new();
+        for page_index in start..=end {
+            if page_index == selected_page {
+                continue;
+            }
+            if self.cached_page(page_index, BASE_RENDER_WIDTH).is_some()
+                || self.pending_prefetch_pages.contains(&page_index)
+                || self
+                    .pending_page_render
+                    .as_ref()
+                    .is_some_and(|pending| pending.page_index == page_index)
+            {
+                continue;
+            }
+            targets.push(page_index);
+        }
+        let path = document.path.clone();
+        for page_index in targets {
+            self.pending_prefetch_pages.insert(page_index);
+            let tx = self.render_result_tx.clone();
+            let path = path.clone();
+            let renderer = self.renderer;
+            let egui_ctx = ctx.clone();
+            thread::spawn(move || {
+                let result = renderer.render_page(&path, page_index, BASE_RENDER_WIDTH);
+                let _ = tx.send(RenderJobResult::PrefetchPage {
+                    path,
+                    page_index,
+                    target_width: BASE_RENDER_WIDTH,
+                    result,
+                });
+                egui_ctx.request_repaint();
+            });
+        }
     }
 
     fn install_texture(&mut self, ctx: &egui::Context, rendered: RenderedPage) {
@@ -244,7 +341,9 @@ impl GlyphApp {
                     }
                     match result {
                         Ok(rendered) => {
+                            self.cache_rendered_page(rendered.clone());
                             self.install_texture(ctx, rendered);
+                            self.queue_adjacent_page_prefetch(ctx);
                             self.status = format!(
                                 "Rendered page {} of {} — {}",
                                 page_index + 1,
@@ -286,6 +385,31 @@ impl GlyphApp {
                         }
                         Err(err) => {
                             self.status = format!("High-res tile render failed: {err}");
+                        }
+                    }
+                }
+                RenderJobResult::PrefetchPage {
+                    path,
+                    page_index,
+                    target_width,
+                    result,
+                } => {
+                    self.pending_prefetch_pages.remove(&page_index);
+                    let is_same_document = self
+                        .project
+                        .document
+                        .as_ref()
+                        .is_some_and(|document| document.path == path);
+                    if !is_same_document {
+                        continue;
+                    }
+                    if target_width != BASE_RENDER_WIDTH {
+                        continue;
+                    }
+                    if let Ok(rendered) = result {
+                        self.cache_rendered_page(rendered.clone());
+                        if self.project.selected_page == page_index && self.page_texture.is_none() {
+                            self.install_texture(ctx, rendered);
                         }
                     }
                 }
@@ -887,14 +1011,9 @@ impl eframe::App for GlyphApp {
                         egui::vec2(page_w, page_h),
                     );
                     painter.rect_filled(
-                        page_rect.expand(18.0).translate(egui::vec2(0.0, 8.0)),
-                        12.0,
-                        egui::Color32::from_black_alpha(110),
-                    );
-                    painter.rect_filled(
-                        page_rect.expand(5.0),
-                        8.0,
-                        egui::Color32::from_rgb(226, 228, 232),
+                        page_rect.expand(10.0).translate(egui::vec2(0.0, 5.0)),
+                        3.0,
+                        egui::Color32::from_black_alpha(78),
                     );
                     self.ensure_visible_tile(ui.ctx(), rect, page_rect);
                     painter.image(
@@ -918,9 +1037,9 @@ impl eframe::App for GlyphApp {
                     }
                     painter.rect_stroke(
                         page_rect,
-                        6.0,
-                        egui::Stroke::new(1.0, egui::Color32::from_gray(92)),
-                        egui::StrokeKind::Outside,
+                        1.0,
+                        egui::Stroke::new(1.0, egui::Color32::from_black_alpha(80)),
+                        egui::StrokeKind::Inside,
                     );
                 } else {
                     draw_empty_state(ui, rect);
@@ -1290,6 +1409,12 @@ mod tests {
     fn format_page_counter_uses_one_based_pages() {
         assert_eq!(format_page_counter(0, 12), "Page 1 / 12");
         assert_eq!(format_page_counter(11, 12), "Page 12 / 12");
+    }
+
+    #[test]
+    fn adjacent_page_prefetch_keeps_small_native_cache() {
+        assert_eq!(PAGE_PREFETCH_RADIUS, 2);
+        assert_eq!(PAGE_CACHE_LIMIT, 7);
     }
 
     #[test]
