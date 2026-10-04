@@ -48,6 +48,7 @@ pub struct GlyphApp {
     last_canvas_pointer: Option<egui::Pos2>,
     last_view_change: Option<Instant>,
     navigation_tab: NavigationTab,
+    sidebar_collapsed: bool,
     render_result_tx: mpsc::Sender<RenderJobResult>,
     render_result_rx: mpsc::Receiver<RenderJobResult>,
     next_render_job_id: u64,
@@ -115,6 +116,7 @@ impl GlyphApp {
             last_canvas_pointer: None,
             last_view_change: None,
             navigation_tab: NavigationTab::Pages,
+            sidebar_collapsed: false,
             render_result_tx,
             render_result_rx,
             next_render_job_id: 1,
@@ -728,170 +730,207 @@ impl eframe::App for GlyphApp {
                 });
             });
 
-        egui::Panel::left("sheet_sidebar")
-            .resizable(true)
-            .default_size(328.0)
-            .size_range(260.0..=420.0)
-            .frame(
-                egui::Frame::new()
-                    .fill(theme::PANEL)
-                    .stroke(egui::Stroke::new(1.0, theme::STROKE_STRONG))
-                    .inner_margin(egui::Margin::symmetric(10, 12)),
-            )
-            .show(ui, |ui| {
-                ui.vertical(|ui| {
-                    if let Some(document) = &self.project.document {
-                        let display_name = document.display_name();
-                        let page_count = document.summary.page_count;
-                        let pages = document.summary.pages.clone();
-                        let bookmarks = document.summary.bookmarks.clone();
-                        egui::Frame::new()
-                            .fill(theme::CARD)
-                            .stroke(egui::Stroke::new(1.0, theme::STROKE))
-                            .corner_radius(egui::CornerRadius::same(4))
-                            .inner_margin(egui::Margin::symmetric(10, 8))
-                            .show(ui, |ui| {
-                                ui.horizontal(|ui| {
-                                    ui.label(
-                                        egui::RichText::new("PDF")
-                                            .monospace()
-                                            .strong()
-                                            .size(11.0)
-                                            .color(theme::ACCENT),
-                                    );
-                                    ui.label(
-                                        egui::RichText::new(display_name)
-                                            .monospace()
-                                            .size(13.0)
-                                            .strong()
-                                            .color(theme::TEXT),
-                                    );
-                                    ui.with_layout(
-                                        egui::Layout::right_to_left(egui::Align::Center),
-                                        |ui| {
-                                            ui.label(
-                                                egui::RichText::new(format_page_counter(
-                                                    self.project.selected_page,
-                                                    page_count,
-                                                ))
-                                                .size(12.0)
-                                                .color(theme::TEXT_MUTED),
-                                            );
-                                        },
-                                    );
+        if self.sidebar_collapsed {
+            egui::Panel::left("sheet_sidebar_collapsed")
+                .resizable(false)
+                .default_size(46.0)
+                .size_range(46.0..=46.0)
+                .frame(
+                    egui::Frame::new()
+                        .fill(theme::PANEL)
+                        .stroke(egui::Stroke::new(1.0, theme::STROKE_STRONG))
+                        .inner_margin(egui::Margin::symmetric(6, 12)),
+                )
+                .show(ui, |ui| {
+                    ui.vertical_centered(|ui| {
+                        if sidebar_toggle_button(ui, ">", "Show sidebar").clicked() {
+                            self.sidebar_collapsed = false;
+                        }
+                        ui.add_space(8.0);
+                        ui.label(
+                            egui::RichText::new("NAV")
+                                .monospace()
+                                .size(10.0)
+                                .color(theme::TEXT_FAINT),
+                        );
+                    });
+                });
+        } else {
+            egui::Panel::left("sheet_sidebar")
+                .resizable(true)
+                .default_size(328.0)
+                .size_range(260.0..=420.0)
+                .frame(
+                    egui::Frame::new()
+                        .fill(theme::PANEL)
+                        .stroke(egui::Stroke::new(1.0, theme::STROKE_STRONG))
+                        .inner_margin(egui::Margin::symmetric(10, 12)),
+                )
+                .show(ui, |ui| {
+                    ui.vertical(|ui| {
+                        if sidebar_wide_toggle_button(ui, "<  Hide sidebar", "Hide sidebar")
+                            .clicked()
+                        {
+                            self.sidebar_collapsed = true;
+                        }
+                        ui.add_space(8.0);
+
+                        if let Some(document) = &self.project.document {
+                            let display_name = document.display_name();
+                            let page_count = document.summary.page_count;
+                            let pages = document.summary.pages.clone();
+                            let bookmarks = document.summary.bookmarks.clone();
+                            egui::Frame::new()
+                                .fill(theme::CARD)
+                                .stroke(egui::Stroke::new(1.0, theme::STROKE))
+                                .corner_radius(egui::CornerRadius::same(4))
+                                .inner_margin(egui::Margin::symmetric(10, 8))
+                                .show(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            egui::RichText::new("PDF")
+                                                .monospace()
+                                                .strong()
+                                                .size(11.0)
+                                                .color(theme::ACCENT),
+                                        );
+                                        ui.label(
+                                            egui::RichText::new(display_name)
+                                                .monospace()
+                                                .size(13.0)
+                                                .strong()
+                                                .color(theme::TEXT),
+                                        );
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                ui.label(
+                                                    egui::RichText::new(format_page_counter(
+                                                        self.project.selected_page,
+                                                        page_count,
+                                                    ))
+                                                    .size(12.0)
+                                                    .color(theme::TEXT_MUTED),
+                                                );
+                                            },
+                                        );
+                                    });
                                 });
+                            ui.add_space(8.0);
+                            ui.horizontal(|ui| {
+                                if ui
+                                    .add_enabled(
+                                        self.can_go_previous(),
+                                        egui::Button::new("← Prev")
+                                            .fill(theme::CONTROL)
+                                            .corner_radius(4),
+                                    )
+                                    .clicked()
+                                {
+                                    self.previous_page(&ctx);
+                                }
+                                if ui
+                                    .add_enabled(
+                                        self.can_go_next(),
+                                        egui::Button::new("Next →")
+                                            .fill(theme::CONTROL)
+                                            .corner_radius(4),
+                                    )
+                                    .clicked()
+                                {
+                                    self.next_page(&ctx);
+                                }
                             });
-                        ui.add_space(8.0);
-                        ui.horizontal(|ui| {
-                            if ui
-                                .add_enabled(
-                                    self.can_go_previous(),
-                                    egui::Button::new("← Prev")
-                                        .fill(theme::CONTROL)
-                                        .corner_radius(4),
+                            ui.add_space(12.0);
+
+                            ui.horizontal(|ui| {
+                                if nav_tab_button(
+                                    ui,
+                                    "Pages",
+                                    self.navigation_tab == NavigationTab::Pages,
                                 )
                                 .clicked()
-                            {
-                                self.previous_page(&ctx);
-                            }
-                            if ui
-                                .add_enabled(
-                                    self.can_go_next(),
-                                    egui::Button::new("Next →")
-                                        .fill(theme::CONTROL)
-                                        .corner_radius(4),
+                                {
+                                    self.navigation_tab = NavigationTab::Pages;
+                                }
+                                if nav_tab_button(
+                                    ui,
+                                    "Bookmarks",
+                                    self.navigation_tab == NavigationTab::Bookmarks,
                                 )
                                 .clicked()
-                            {
-                                self.next_page(&ctx);
-                            }
-                        });
-                        ui.add_space(12.0);
+                                {
+                                    self.navigation_tab = NavigationTab::Bookmarks;
+                                }
+                            });
+                            ui.add_space(8.0);
 
-                        ui.horizontal(|ui| {
-                            if nav_tab_button(
-                                ui,
-                                "Pages",
-                                self.navigation_tab == NavigationTab::Pages,
-                            )
-                            .clicked()
-                            {
-                                self.navigation_tab = NavigationTab::Pages;
-                            }
-                            if nav_tab_button(
-                                ui,
-                                "Bookmarks",
-                                self.navigation_tab == NavigationTab::Bookmarks,
-                            )
-                            .clicked()
-                            {
-                                self.navigation_tab = NavigationTab::Bookmarks;
-                            }
-                        });
-                        ui.add_space(8.0);
-
-                        match self.navigation_tab {
-                            NavigationTab::Pages => {
-                                egui::ScrollArea::vertical().show(ui, |ui| {
-                                    for page in pages {
-                                        let is_selected = self.project.selected_page == page.index;
-                                        let title = page.label.as_deref().unwrap_or("Page");
-                                        let label = format!("{:>3}   {title}", page.index + 1);
-                                        if page_row(ui, &label, is_selected).clicked() {
-                                            self.select_page(page.index, &ctx);
-                                        }
-                                    }
-                                });
-                            }
-                            NavigationTab::Bookmarks => {
-                                if bookmarks.is_empty() {
-                                    empty_sidebar_note(ui, "No bookmarks in this PDF.");
-                                } else {
+                            match self.navigation_tab {
+                                NavigationTab::Pages => {
                                     egui::ScrollArea::vertical().show(ui, |ui| {
-                                        for bookmark in bookmarks {
+                                        for page in pages {
                                             let is_selected =
-                                                bookmark.page_index.is_some_and(|page| {
-                                                    page == self.project.selected_page
-                                                });
-                                            let response = bookmark_row(
-                                                ui,
-                                                &bookmark.title,
-                                                bookmark.depth,
-                                                bookmark.page_index,
-                                                is_selected,
-                                            );
-                                            if response.clicked() {
-                                                if let Some(page_index) = bookmark.page_index {
-                                                    self.select_page(page_index, &ctx);
-                                                }
+                                                self.project.selected_page == page.index;
+                                            let title = page.label.as_deref().unwrap_or("Page");
+                                            let label = format!("{:>3}   {title}", page.index + 1);
+                                            if page_row(ui, &label, is_selected).clicked() {
+                                                self.select_page(page.index, &ctx);
                                             }
                                         }
                                     });
                                 }
+                                NavigationTab::Bookmarks => {
+                                    if bookmarks.is_empty() {
+                                        empty_sidebar_note(ui, "No bookmarks in this PDF.");
+                                    } else {
+                                        egui::ScrollArea::vertical().show(ui, |ui| {
+                                            for bookmark in bookmarks {
+                                                let is_selected =
+                                                    bookmark.page_index.is_some_and(|page| {
+                                                        page == self.project.selected_page
+                                                    });
+                                                let response = bookmark_row(
+                                                    ui,
+                                                    &bookmark.title,
+                                                    bookmark.depth,
+                                                    bookmark.page_index,
+                                                    is_selected,
+                                                );
+                                                if response.clicked() {
+                                                    if let Some(page_index) = bookmark.page_index {
+                                                        self.select_page(page_index, &ctx);
+                                                    }
+                                                }
+                                            }
+                                        });
+                                    }
+                                }
                             }
+                        } else {
+                            egui::Frame::new()
+                                .fill(theme::CARD)
+                                .stroke(egui::Stroke::new(1.0, theme::STROKE))
+                                .corner_radius(egui::CornerRadius::same(4))
+                                .inner_margin(egui::Margin::same(14))
+                                .show(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            egui::RichText::new("No PDF loaded")
+                                                .size(16.0)
+                                                .strong()
+                                                .color(theme::TEXT),
+                                        );
+                                    });
+                                    ui.add_space(4.0);
+                                    ui.label(
+                                        egui::RichText::new("Drop a PDF here or press Ctrl+O.")
+                                            .color(theme::TEXT_MUTED),
+                                    );
+                                });
                         }
-                    } else {
-                        egui::Frame::new()
-                            .fill(theme::CARD)
-                            .stroke(egui::Stroke::new(1.0, theme::STROKE))
-                            .corner_radius(egui::CornerRadius::same(4))
-                            .inner_margin(egui::Margin::same(14))
-                            .show(ui, |ui| {
-                                ui.label(
-                                    egui::RichText::new("No PDF loaded")
-                                        .size(16.0)
-                                        .strong()
-                                        .color(theme::TEXT),
-                                );
-                                ui.add_space(4.0);
-                                ui.label(
-                                    egui::RichText::new("Drop a PDF here or press Ctrl+O.")
-                                        .color(theme::TEXT_MUTED),
-                                );
-                            });
-                    }
+                    });
                 });
-            });
+        }
 
         egui::Panel::bottom("status_bar")
             .frame(
@@ -1206,6 +1245,38 @@ fn tool_chip(ui: &mut egui::Ui, label: &str) -> egui::Response {
             .corner_radius(egui::CornerRadius::same(4))
             .min_size(egui::vec2(36.0, 26.0)),
     )
+}
+
+fn sidebar_toggle_button(ui: &mut egui::Ui, label: &str, tooltip: &str) -> egui::Response {
+    ui.add(
+        egui::Button::new(
+            egui::RichText::new(label)
+                .strong()
+                .color(theme::ACCENT)
+                .size(14.0),
+        )
+        .fill(theme::CONTROL)
+        .stroke(egui::Stroke::new(1.0, theme::STROKE))
+        .corner_radius(egui::CornerRadius::same(4))
+        .min_size(egui::vec2(28.0, 26.0)),
+    )
+    .on_hover_text(tooltip)
+}
+
+fn sidebar_wide_toggle_button(ui: &mut egui::Ui, label: &str, tooltip: &str) -> egui::Response {
+    ui.add(
+        egui::Button::new(
+            egui::RichText::new(label)
+                .monospace()
+                .strong()
+                .color(theme::ACCENT),
+        )
+        .fill(theme::CONTROL)
+        .stroke(egui::Stroke::new(1.0, theme::STROKE))
+        .corner_radius(egui::CornerRadius::same(4))
+        .min_size(egui::vec2(ui.available_width(), 28.0)),
+    )
+    .on_hover_text(tooltip)
 }
 
 fn metric_pill(ui: &mut egui::Ui, label: &str) {
