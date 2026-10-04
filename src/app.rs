@@ -1,20 +1,22 @@
 use crate::core::project::ProjectState;
 use crate::pdf::{
-    LopdfInspectionEngine, PdfEngine, PdfRenderEngine, PdfiumRenderEngine, RenderedPage,
+    LopdfInspectionEngine, PdfEngine, PdfError, PdfRenderEngine, PdfiumRenderEngine, RenderedPage,
     RenderedTile, TileRequest,
 };
 use crate::theme;
 use eframe::egui;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+use std::thread;
 use std::time::{Duration, Instant};
 
 const BASE_RENDER_WIDTH: u16 = 1800;
 const MAX_RENDER_WIDTH: u16 = 8192;
 const RERENDER_UPSCALE_THRESHOLD: f32 = 1.15;
-const VIEW_RERENDER_IDLE: Duration = Duration::from_millis(220);
+const VIEW_RERENDER_IDLE: Duration = Duration::from_millis(320);
 const TILE_RENDER_TRIGGER_ZOOM: f32 = 2.0;
-const TILE_RENDER_MAX_EDGE: usize = 3072;
-const TILE_RENDER_MARGIN: f32 = 0.10;
+const TILE_RENDER_MAX_EDGE: usize = 2048;
+const TILE_RENDER_MARGIN: f32 = 0.06;
 const MAX_TILE_FULL_WIDTH: usize = 32_768;
 const MIN_ZOOM: f32 = 0.1;
 const MAX_ZOOM: f32 = 8.0;
@@ -41,11 +43,48 @@ pub struct GlyphApp {
     last_canvas_pointer: Option<egui::Pos2>,
     last_view_change: Option<Instant>,
     navigation_tab: NavigationTab,
+    render_result_tx: mpsc::Sender<RenderJobResult>,
+    render_result_rx: mpsc::Receiver<RenderJobResult>,
+    next_render_job_id: u64,
+    pending_page_render: Option<PendingPageRender>,
+    pending_tile_render: Option<PendingTileRender>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingPageRender {
+    id: u64,
+    path: PathBuf,
+    page_index: usize,
+    target_width: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingTileRender {
+    id: u64,
+    path: PathBuf,
+    request: TileRequest,
+}
+
+enum RenderJobResult {
+    Page {
+        id: u64,
+        path: PathBuf,
+        page_index: usize,
+        target_width: u16,
+        result: Result<RenderedPage, PdfError>,
+    },
+    Tile {
+        id: u64,
+        path: PathBuf,
+        request: TileRequest,
+        result: Result<RenderedTile, PdfError>,
+    },
 }
 
 impl GlyphApp {
     pub fn new(cc: &eframe::CreationContext<'_>, initial_pdf: Option<PathBuf>) -> Self {
         theme::install(&cc.egui_ctx);
+        let (render_result_tx, render_result_rx) = mpsc::channel();
         let mut app = Self {
             project: ProjectState::new("Untitled Glyph Set"),
             status: "Ready — drop a PDF or press Ctrl+O.".to_owned(),
@@ -62,6 +101,11 @@ impl GlyphApp {
             last_canvas_pointer: None,
             last_view_change: None,
             navigation_tab: NavigationTab::Pages,
+            render_result_tx,
+            render_result_rx,
+            next_render_job_id: 1,
+            pending_page_render: None,
+            pending_tile_render: None,
         };
         if let Some(path) = initial_pdf {
             app.open_pdf(path, &cc.egui_ctx);
@@ -91,6 +135,8 @@ impl GlyphApp {
                 self.tile_texture = None;
                 self.page_aspect_ratio = None;
                 self.last_view_change = None;
+                self.pending_page_render = None;
+                self.pending_tile_render = None;
                 self.status = format!("Loaded {}", path.display());
                 self.render_selected_page(ctx, BASE_RENDER_WIDTH);
             }
@@ -107,20 +153,46 @@ impl GlyphApp {
         let path = document.path.clone();
         let page_index = self.project.selected_page;
         self.status = format!("Rendering page {}…", page_index + 1);
-        match self.renderer.render_page(&path, page_index, target_width) {
-            Ok(rendered) => {
-                self.install_texture(ctx, rendered);
-                self.status = format!(
-                    "Rendered page {} of {} — {}",
-                    page_index + 1,
-                    self.page_count().unwrap_or(0),
-                    display_name(&path)
-                );
-            }
-            Err(err) => {
-                self.status = format!("Render failed: {err}");
-            }
+        self.queue_page_render(ctx, path, page_index, target_width);
+    }
+
+    fn queue_page_render(
+        &mut self,
+        ctx: &egui::Context,
+        path: PathBuf,
+        page_index: usize,
+        target_width: u16,
+    ) {
+        if self.pending_page_render.as_ref().is_some_and(|pending| {
+            pending.path == path
+                && pending.page_index == page_index
+                && pending.target_width == target_width
+        }) {
+            return;
         }
+
+        let id = self.next_render_job_id;
+        self.next_render_job_id = self.next_render_job_id.wrapping_add(1).max(1);
+        self.pending_page_render = Some(PendingPageRender {
+            id,
+            path: path.clone(),
+            page_index,
+            target_width,
+        });
+        let tx = self.render_result_tx.clone();
+        let renderer = self.renderer;
+        let egui_ctx = ctx.clone();
+        thread::spawn(move || {
+            let result = renderer.render_page(&path, page_index, target_width);
+            let _ = tx.send(RenderJobResult::Page {
+                id,
+                path,
+                page_index,
+                target_width,
+                result,
+            });
+            egui_ctx.request_repaint();
+        });
     }
 
     fn install_texture(&mut self, ctx: &egui::Context, rendered: RenderedPage) {
@@ -143,6 +215,82 @@ impl GlyphApp {
         self.page_texture = Some(texture);
         self.rendered_tile = None;
         self.tile_texture = None;
+    }
+
+    fn apply_render_results(&mut self, ctx: &egui::Context) {
+        while let Ok(result) = self.render_result_rx.try_recv() {
+            match result {
+                RenderJobResult::Page {
+                    id,
+                    path,
+                    page_index,
+                    target_width,
+                    result,
+                } => {
+                    let is_current = self.project.document.as_ref().is_some_and(|document| {
+                        document.path == path && self.project.selected_page == page_index
+                    });
+                    let is_latest = self.pending_page_render.as_ref().is_some_and(|pending| {
+                        pending.id == id
+                            && pending.path == path
+                            && pending.page_index == page_index
+                            && pending.target_width == target_width
+                    });
+                    if is_latest {
+                        self.pending_page_render = None;
+                    }
+                    if !is_current || !is_latest {
+                        continue;
+                    }
+                    match result {
+                        Ok(rendered) => {
+                            self.install_texture(ctx, rendered);
+                            self.status = format!(
+                                "Rendered page {} of {} — {}",
+                                page_index + 1,
+                                self.page_count().unwrap_or(0),
+                                display_name(&path)
+                            );
+                        }
+                        Err(err) => {
+                            self.status = format!("Render failed: {err}");
+                        }
+                    }
+                }
+                RenderJobResult::Tile {
+                    id,
+                    path,
+                    request,
+                    result,
+                } => {
+                    let is_current = self.project.document.as_ref().is_some_and(|document| {
+                        document.path == path && self.project.selected_page == request.page_index
+                    });
+                    let is_latest = self.pending_tile_render.as_ref().is_some_and(|pending| {
+                        pending.id == id && pending.path == path && pending.request == request
+                    });
+                    if is_latest {
+                        self.pending_tile_render = None;
+                    }
+                    if !is_current || !is_latest {
+                        continue;
+                    }
+                    match result {
+                        Ok(tile) => {
+                            self.install_tile_texture(ctx, tile);
+                            self.status = format!(
+                                "Rendered high-res viewport tile — page {} — {}%",
+                                self.project.selected_page + 1,
+                                (self.zoom * 100.0).round() as i32
+                            );
+                        }
+                        Err(err) => {
+                            self.status = format!("High-res tile render failed: {err}");
+                        }
+                    }
+                }
+            }
+        }
     }
 
     fn install_tile_texture(&mut self, ctx: &egui::Context, tile: RenderedTile) {
@@ -196,6 +344,12 @@ impl GlyphApp {
             .unwrap_or(false)
     }
 
+    fn mark_view_changed(&mut self) {
+        self.last_view_change = Some(Instant::now());
+        self.rendered_tile = None;
+        self.tile_texture = None;
+    }
+
     fn select_page(&mut self, page_index: usize, ctx: &egui::Context) {
         let Some(page_count) = self.page_count() else {
             return;
@@ -205,9 +359,13 @@ impl GlyphApp {
             self.project.selected_page = page_index;
             self.zoom = 1.0;
             self.pan = egui::Vec2::ZERO;
+            self.rendered_page = None;
+            self.page_texture = None;
             self.page_aspect_ratio = None;
             self.rendered_tile = None;
             self.tile_texture = None;
+            self.pending_page_render = None;
+            self.pending_tile_render = None;
             self.render_selected_page(ctx, BASE_RENDER_WIDTH);
         }
     }
@@ -235,7 +393,7 @@ impl GlyphApp {
         let height_zoom = safe_height / logical_size.y;
         self.zoom = width_zoom.min(height_zoom).clamp(MIN_ZOOM, MAX_ZOOM);
         self.pan = egui::Vec2::ZERO;
-        self.last_view_change = Some(Instant::now());
+        self.mark_view_changed();
     }
 
     fn logical_page_size(&self, rendered: &RenderedPage) -> egui::Vec2 {
@@ -269,7 +427,15 @@ impl GlyphApp {
             }
         }
 
-        self.render_selected_page(ctx, desired_width);
+        let Some(document) = &self.project.document else {
+            return;
+        };
+        self.queue_page_render(
+            ctx,
+            document.path.clone(),
+            self.project.selected_page,
+            desired_width,
+        );
         self.last_view_change = None;
     }
 
@@ -312,19 +478,34 @@ impl GlyphApp {
             return;
         }
 
-        match self.renderer.render_tile(&document.path, request) {
-            Ok(tile) => {
-                self.install_tile_texture(ctx, tile);
-                self.status = format!(
-                    "Rendered high-res viewport tile — page {} — {}%",
-                    self.project.selected_page + 1,
-                    (self.zoom * 100.0).round() as i32
-                );
-            }
-            Err(err) => {
-                self.status = format!("High-res tile render failed: {err}");
-            }
+        if self
+            .pending_tile_render
+            .as_ref()
+            .is_some_and(|pending| pending.path == document.path && pending.request == request)
+        {
+            return;
         }
+        let id = self.next_render_job_id;
+        self.next_render_job_id = self.next_render_job_id.wrapping_add(1).max(1);
+        self.pending_tile_render = Some(PendingTileRender {
+            id,
+            path: document.path.clone(),
+            request,
+        });
+        let tx = self.render_result_tx.clone();
+        let path = document.path.clone();
+        let renderer = self.renderer;
+        let egui_ctx = ctx.clone();
+        thread::spawn(move || {
+            let result = renderer.render_tile(&path, request);
+            let _ = tx.send(RenderJobResult::Tile {
+                id,
+                path,
+                request,
+                result,
+            });
+            egui_ctx.request_repaint();
+        });
     }
 
     fn reset_view(&mut self) {
@@ -383,6 +564,7 @@ impl GlyphApp {
 impl eframe::App for GlyphApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.apply_render_results(&ctx);
         self.handle_dropped_files(&ctx);
         self.handle_shortcuts(&ctx);
 
@@ -624,12 +806,14 @@ impl eframe::App for GlyphApp {
                         ui.horizontal(|ui| {
                             if tool_chip(ui, "−").clicked() {
                                 self.zoom = (self.zoom * 0.9).max(MIN_ZOOM);
-                                self.last_view_change = Some(Instant::now());
+                                self.mark_view_changed();
+                                ctx.request_repaint();
                             }
                             metric_pill(ui, &format_zoom_label(self.zoom));
                             if tool_chip(ui, "+").clicked() {
                                 self.zoom = (self.zoom * 1.1).min(MAX_ZOOM);
-                                self.last_view_change = Some(Instant::now());
+                                self.mark_view_changed();
+                                ctx.request_repaint();
                             }
                             ui.add_space(8.0);
                             if tool_chip(ui, "Fit page").clicked() {
@@ -655,7 +839,7 @@ impl eframe::App for GlyphApp {
                 let primary_pan = response.dragged_by(egui::PointerButton::Primary);
                 if middle_pan || primary_pan {
                     self.pan += pointer_delta;
-                    self.last_view_change = Some(Instant::now());
+                    self.mark_view_changed();
                     ctx.request_repaint();
                 }
                 if let Some(pointer) = response.hover_pos() {
@@ -672,14 +856,16 @@ impl eframe::App for GlyphApp {
                     if (pinch_scale - 1.0).abs() > f32::EPSILON {
                         (self.zoom, self.pan) =
                             zoom_around_pointer(self.zoom, self.pan, pinch_scale, pointer, rect);
-                        self.last_view_change = Some(Instant::now());
+                        self.mark_view_changed();
+                        ctx.request_repaint();
                     } else {
                         let scroll_y = ui.input(|i| i.smooth_scroll_delta.y);
                         if scroll_y.abs() > 0.0 {
                             let scale = if scroll_y > 0.0 { 1.08 } else { 0.92 };
                             (self.zoom, self.pan) =
                                 zoom_around_pointer(self.zoom, self.pan, scale, pointer, rect);
-                            self.last_view_change = Some(Instant::now());
+                            self.mark_view_changed();
+                            ctx.request_repaint();
                         }
                     }
                 }
