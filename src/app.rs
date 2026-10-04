@@ -1,7 +1,8 @@
 use crate::core::project::ProjectState;
+use crate::core::sheet::{SheetCandidate, SheetId, generate_bookmark_titles, normalize_sheet_id};
 use crate::pdf::{
-    LopdfInspectionEngine, PdfEngine, PdfError, PdfRenderEngine, PdfiumRenderEngine, RenderedPage,
-    RenderedTile, TileRequest,
+    LopdfEditEngine, LopdfInspectionEngine, PdfEngine, PdfError, PdfRenderEngine,
+    PdfiumRenderEngine, RenderedPage, RenderedTile, TileRequest,
 };
 use crate::theme;
 use eframe::egui;
@@ -37,6 +38,7 @@ pub struct GlyphApp {
     pan: egui::Vec2,
     inspector: LopdfInspectionEngine,
     renderer: PdfiumRenderEngine,
+    editor: LopdfEditEngine,
     rendered_page: Option<RenderedPage>,
     page_texture: Option<egui::TextureHandle>,
     page_cache: HashMap<usize, RenderedPage>,
@@ -105,6 +107,7 @@ impl GlyphApp {
             pan: egui::Vec2::ZERO,
             inspector: LopdfInspectionEngine,
             renderer: PdfiumRenderEngine,
+            editor: LopdfEditEngine,
             rendered_page: None,
             page_texture: None,
             page_cache: HashMap::new(),
@@ -634,6 +637,96 @@ impl GlyphApp {
         });
     }
 
+    fn generate_bookmarks_for_current_pdf(&mut self, ctx: &egui::Context) {
+        let Some(document) = &self.project.document else {
+            self.status = "Load a PDF before generating bookmarks.".to_owned();
+            return;
+        };
+        let candidates = bookmark_candidates_from_pages(&document.summary.pages);
+        let bookmarks = generate_bookmark_titles(&candidates, document.summary.page_count);
+        let output = sibling_pdf_path(&document.path, "bookmarked");
+        match self
+            .editor
+            .write_bookmarks(&document.path, &output, &bookmarks)
+        {
+            Ok(report) => {
+                let message = format!(
+                    "Generated {} bookmarks -> {}",
+                    report.bookmarks_written,
+                    report.output_path.display()
+                );
+                self.open_pdf(report.output_path, ctx);
+                self.status = message;
+                self.navigation_tab = NavigationTab::Bookmarks;
+            }
+            Err(err) => {
+                self.status = format!("Bookmark generator failed: {err}");
+            }
+        }
+    }
+
+    fn generate_hyperlinks_for_current_pdf(&mut self, ctx: &egui::Context) {
+        let Some(document) = &self.project.document else {
+            self.status = "Load a PDF before generating hyperlinks.".to_owned();
+            return;
+        };
+        let candidates = bookmark_candidates_from_pages(&document.summary.pages);
+        let sheets = generate_bookmark_titles(&candidates, document.summary.page_count);
+        match self
+            .renderer
+            .generate_sheet_label_links(&document.path, &sheets)
+        {
+            Ok(links) if links.is_empty() => {
+                self.status = "No sheet-label hyperlinks found in visible PDF text.".to_owned();
+            }
+            Ok(links) => {
+                let output = sibling_pdf_path(&document.path, "hyperlinked");
+                match self.editor.write_links(&document.path, &output, &links) {
+                    Ok(report) => {
+                        let message = format!(
+                            "Generated {} hyperlinks -> {}",
+                            report.links_written,
+                            report.output_path.display()
+                        );
+                        self.open_pdf(report.output_path, ctx);
+                        self.status = message;
+                    }
+                    Err(err) => {
+                        self.status = format!("Hyperlink generator failed: {err}");
+                    }
+                }
+            }
+            Err(err) => {
+                self.status = format!("Hyperlink generator failed: {err}");
+            }
+        }
+    }
+
+    fn flatten_current_pdf(&mut self, ctx: &egui::Context) {
+        let Some(document) = &self.project.document else {
+            self.status = "Load a PDF before flattening.".to_owned();
+            return;
+        };
+        let output = sibling_pdf_path(&document.path, "flattened");
+        match self
+            .editor
+            .flatten_interactive_annotations(&document.path, &output)
+        {
+            Ok(report) => {
+                let message = format!(
+                    "Flattened {} annotation sets -> {}",
+                    report.annotations_removed,
+                    report.output_path.display()
+                );
+                self.open_pdf(report.output_path, ctx);
+                self.status = message;
+            }
+            Err(err) => {
+                self.status = format!("Flatten failed: {err}");
+            }
+        }
+    }
+
     fn reset_view(&mut self) {
         self.zoom = 1.0;
         self.pan = egui::Vec2::ZERO;
@@ -985,6 +1078,16 @@ impl eframe::App for GlyphApp {
                             if tool_chip(ui, "Reset").clicked() {
                                 self.reset_view();
                             }
+                            ui.add_space(12.0);
+                            if tool_chip(ui, "Auto bookmarks").clicked() {
+                                self.generate_bookmarks_for_current_pdf(&ctx);
+                            }
+                            if tool_chip(ui, "Hyperlinks").clicked() {
+                                self.generate_hyperlinks_for_current_pdf(&ctx);
+                            }
+                            if tool_chip(ui, "Flatten").clicked() {
+                                self.flatten_current_pdf(&ctx);
+                            }
                         });
                     });
                 ui.add_space(12.0);
@@ -1203,6 +1306,32 @@ fn zoom_around_pointer(
     let document_point_under_pointer = (pointer - old_page_center) / old_zoom;
     let new_page_center = pointer - document_point_under_pointer * new_zoom;
     (new_zoom, new_page_center - viewport.center())
+}
+
+fn sibling_pdf_path(path: &Path, suffix: &str) -> PathBuf {
+    let stem = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .filter(|stem| !stem.is_empty())
+        .unwrap_or("glyph-document");
+    path.with_file_name(format!("{stem}.glyph-{suffix}.pdf"))
+}
+
+fn bookmark_candidates_from_pages(pages: &[crate::pdf::PdfPageInfo]) -> Vec<SheetCandidate> {
+    pages
+        .iter()
+        .filter_map(|page| {
+            let label = page.label.as_deref()?;
+            let id = normalize_sheet_id(label)
+                .unwrap_or_else(|| SheetId(format!("P{}", page.index + 1)));
+            Some(SheetCandidate {
+                id,
+                title: Some(label.to_owned()),
+                page_index: page.index,
+                confidence: 50,
+            })
+        })
+        .collect()
 }
 
 fn format_page_counter(selected_page: usize, page_count: usize) -> String {

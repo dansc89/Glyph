@@ -1,4 +1,8 @@
-use lopdf::{Document, Object, ObjectId};
+use crate::core::links::{
+    LinkLabelHit, LinkProposal, PdfRect as LinkRect, generate_link_proposals,
+};
+use crate::core::sheet::SheetCandidate;
+use lopdf::{Document, Object, ObjectId, dictionary};
 use pdfium_bundled::pdfium_render::prelude::{
     PdfBitmap, PdfBitmapFormat, PdfRenderConfig, Pdfium, PdfiumError,
 };
@@ -19,6 +23,8 @@ pub enum PdfError {
     Load(String),
     #[error("PDF render failed: {0}")]
     Render(String),
+    #[error("PDF edit failed: {0}")]
+    Edit(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -40,6 +46,202 @@ pub struct PdfDocumentSummary {
     pub pages: Vec<PdfPageInfo>,
     pub bookmarks: Vec<PdfBookmark>,
     pub title: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PdfEditReport {
+    pub output_path: std::path::PathBuf,
+    pub bookmarks_written: usize,
+    pub links_written: usize,
+    pub annotations_removed: usize,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct LopdfEditEngine;
+
+impl LopdfEditEngine {
+    pub fn write_bookmarks(
+        &self,
+        input: &Path,
+        output: &Path,
+        bookmarks: &[SheetCandidate],
+    ) -> Result<PdfEditReport, PdfError> {
+        validate_pdf_path(input)?;
+        let mut doc = Document::load(input).map_err(|err| PdfError::Load(err.to_string()))?;
+        let written = install_bookmark_outline(&mut doc, bookmarks)?;
+        doc.save(output)
+            .map_err(|err| PdfError::Edit(err.to_string()))?;
+        Ok(PdfEditReport {
+            output_path: output.to_path_buf(),
+            bookmarks_written: written,
+            links_written: 0,
+            annotations_removed: 0,
+        })
+    }
+
+    pub fn write_links(
+        &self,
+        input: &Path,
+        output: &Path,
+        links: &[LinkProposal],
+    ) -> Result<PdfEditReport, PdfError> {
+        validate_pdf_path(input)?;
+        let mut doc = Document::load(input).map_err(|err| PdfError::Load(err.to_string()))?;
+        let written = install_link_annotations(&mut doc, links)?;
+        doc.save(output)
+            .map_err(|err| PdfError::Edit(err.to_string()))?;
+        Ok(PdfEditReport {
+            output_path: output.to_path_buf(),
+            bookmarks_written: 0,
+            links_written: written,
+            annotations_removed: 0,
+        })
+    }
+
+    pub fn flatten_interactive_annotations(
+        &self,
+        input: &Path,
+        output: &Path,
+    ) -> Result<PdfEditReport, PdfError> {
+        validate_pdf_path(input)?;
+        let mut doc = Document::load(input).map_err(|err| PdfError::Load(err.to_string()))?;
+        let removed = remove_interactive_annotations(&mut doc)?;
+        doc.save(output)
+            .map_err(|err| PdfError::Edit(err.to_string()))?;
+        Ok(PdfEditReport {
+            output_path: output.to_path_buf(),
+            bookmarks_written: 0,
+            links_written: 0,
+            annotations_removed: removed,
+        })
+    }
+}
+
+fn install_bookmark_outline(
+    doc: &mut Document,
+    bookmarks: &[SheetCandidate],
+) -> Result<usize, PdfError> {
+    let pages = doc.get_pages();
+    let mut items = Vec::new();
+    for bookmark in bookmarks {
+        let page_number = (bookmark.page_index + 1) as u32;
+        let Some(page_id) = pages.get(&page_number).copied() else {
+            continue;
+        };
+        let title = bookmark
+            .title
+            .as_deref()
+            .filter(|title| !title.trim().is_empty())
+            .unwrap_or(&bookmark.id.0)
+            .trim()
+            .to_owned();
+        if title.is_empty() {
+            continue;
+        }
+        items.push((title, page_id));
+    }
+    if items.is_empty() {
+        return Ok(0);
+    }
+
+    let outlines_id = doc.new_object_id();
+    let item_ids: Vec<ObjectId> = (0..items.len()).map(|_| doc.new_object_id()).collect();
+    for (index, ((title, page_id), item_id)) in items.iter().zip(item_ids.iter()).enumerate() {
+        let mut item = dictionary! {
+            "Title" => Object::string_literal(title.as_str()),
+            "Parent" => Object::Reference(outlines_id),
+            "Dest" => Object::Array(vec![Object::Reference(*page_id), Object::Name(b"Fit".to_vec())]),
+        };
+        if index > 0 {
+            item.set("Prev", Object::Reference(item_ids[index - 1]));
+        }
+        if index + 1 < item_ids.len() {
+            item.set("Next", Object::Reference(item_ids[index + 1]));
+        }
+        doc.objects.insert(*item_id, Object::Dictionary(item));
+    }
+
+    let outlines = dictionary! {
+        "Type" => Object::Name(b"Outlines".to_vec()),
+        "First" => Object::Reference(item_ids[0]),
+        "Last" => Object::Reference(*item_ids.last().unwrap()),
+        "Count" => Object::Integer(item_ids.len() as i64),
+    };
+    doc.objects
+        .insert(outlines_id, Object::Dictionary(outlines));
+    doc.catalog_mut()
+        .map_err(|err| PdfError::Edit(err.to_string()))?
+        .set("Outlines", Object::Reference(outlines_id));
+    Ok(item_ids.len())
+}
+
+fn install_link_annotations(doc: &mut Document, links: &[LinkProposal]) -> Result<usize, PdfError> {
+    let pages = doc.get_pages();
+    let mut written = 0usize;
+    for link in links.iter().filter(|link| link.is_actionable()) {
+        let Some(page_id) = pages.get(&((link.from_page + 1) as u32)).copied() else {
+            continue;
+        };
+        let Some(target_page_id) = pages.get(&((link.target_page + 1) as u32)).copied() else {
+            continue;
+        };
+        let annot_id = doc.new_object_id();
+        let rect = &link.rect;
+        let annotation = dictionary! {
+            "Type" => Object::Name(b"Annot".to_vec()),
+            "Subtype" => Object::Name(b"Link".to_vec()),
+            "Rect" => Object::Array(vec![
+                Object::Real(rect.x),
+                Object::Real(rect.y),
+                Object::Real(rect.x + rect.width),
+                Object::Real(rect.y + rect.height),
+            ]),
+            "Border" => Object::Array(vec![Object::Integer(0), Object::Integer(0), Object::Integer(0)]),
+            "Dest" => Object::Array(vec![Object::Reference(target_page_id), Object::Name(b"Fit".to_vec())]),
+            "Contents" => Object::string_literal(link.label.as_str()),
+        };
+        doc.objects.insert(annot_id, Object::Dictionary(annotation));
+        append_annotation(doc, page_id, annot_id)?;
+        written += 1;
+    }
+    Ok(written)
+}
+
+fn append_annotation(
+    doc: &mut Document,
+    page_id: ObjectId,
+    annot_id: ObjectId,
+) -> Result<(), PdfError> {
+    let page = doc
+        .get_object_mut(page_id)
+        .and_then(Object::as_dict_mut)
+        .map_err(|err| PdfError::Edit(err.to_string()))?;
+    match page.get_mut(b"Annots") {
+        Ok(Object::Array(items)) => items.push(Object::Reference(annot_id)),
+        Ok(existing) => {
+            let old = existing.clone();
+            *existing = Object::Array(vec![old, Object::Reference(annot_id)]);
+        }
+        Err(_) => {
+            page.set("Annots", Object::Array(vec![Object::Reference(annot_id)]));
+        }
+    }
+    Ok(())
+}
+
+fn remove_interactive_annotations(doc: &mut Document) -> Result<usize, PdfError> {
+    let page_ids: Vec<ObjectId> = doc.get_pages().values().copied().collect();
+    let mut removed = 0usize;
+    for page_id in page_ids {
+        let page = doc
+            .get_object_mut(page_id)
+            .and_then(Object::as_dict_mut)
+            .map_err(|err| PdfError::Edit(err.to_string()))?;
+        if page.remove(b"Annots").is_some() {
+            removed += 1;
+        }
+    }
+    Ok(removed)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -313,6 +515,44 @@ impl PdfiumRenderEngine {
         }
         Ok(rendered)
     }
+
+    pub fn generate_sheet_label_links(
+        &self,
+        path: &Path,
+        sheets: &[SheetCandidate],
+    ) -> Result<Vec<LinkProposal>, PdfError> {
+        validate_pdf_path(path)?;
+        let pdfium = bind_bundled_pdfium()?;
+        let document = pdfium
+            .load_pdf_from_file(path, None)
+            .map_err(map_pdfium_load_error)?;
+        let mut hits = Vec::new();
+        for page_index in 0..document.pages().len() as usize {
+            let page = document
+                .pages()
+                .get(page_index as i32)
+                .map_err(|err| PdfError::Load(err.to_string()))?;
+            let text = page.text().map_err(|err| PdfError::Load(err.to_string()))?;
+            for segment in text.segments().iter() {
+                let label_text = segment.text();
+                if crate::core::sheet::normalize_sheet_id(&label_text).is_none() {
+                    continue;
+                }
+                let bounds = segment.bounds();
+                hits.push(LinkLabelHit {
+                    from_page: page_index,
+                    label: label_text,
+                    rect: LinkRect {
+                        x: bounds.left().value,
+                        y: bounds.bottom().value,
+                        width: bounds.width().value,
+                        height: bounds.height().value,
+                    },
+                });
+            }
+        }
+        Ok(generate_link_proposals(&hits, sheets))
+    }
 }
 
 impl PdfRenderEngine for PdfiumRenderEngine {
@@ -521,6 +761,94 @@ mod tests {
         assert_eq!(summary.bookmarks[0].page_index, Some(0));
     }
 
+    #[test]
+    fn edit_engine_writes_generated_bookmark_outline() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("input.pdf");
+        let output = dir.path().join("bookmarked.pdf");
+        std::fs::write(&input, minimal_pdf_bytes()).unwrap();
+        let bookmarks = vec![SheetCandidate {
+            id: crate::core::sheet::SheetId("A-101".to_owned()),
+            title: Some("A-101 Floor Plan".to_owned()),
+            page_index: 0,
+            confidence: 95,
+        }];
+
+        let report = LopdfEditEngine
+            .write_bookmarks(&input, &output, &bookmarks)
+            .unwrap();
+        let summary = LopdfInspectionEngine.inspect(&output).unwrap();
+
+        assert_eq!(report.bookmarks_written, 1);
+        assert_eq!(summary.bookmarks.len(), 1);
+        assert_eq!(summary.bookmarks[0].title, "A-101 Floor Plan");
+        assert_eq!(summary.bookmarks[0].page_index, Some(0));
+    }
+
+    #[test]
+    fn edit_engine_writes_link_annotations() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("input.pdf");
+        let output = dir.path().join("linked.pdf");
+        std::fs::write(&input, minimal_pdf_bytes()).unwrap();
+        std::fs::write(&input, minimal_two_page_pdf_bytes()).unwrap();
+        let links = vec![LinkProposal {
+            from_page: 0,
+            target_page: 1,
+            rect: crate::core::links::PdfRect {
+                x: 20.0,
+                y: 30.0,
+                width: 40.0,
+                height: 12.0,
+            },
+            label: "A-102".to_owned(),
+        }];
+
+        let report = LopdfEditEngine
+            .write_links(&input, &output, &links)
+            .unwrap();
+        let doc = Document::load(&output).unwrap();
+        let page_id = *doc.get_pages().get(&1).unwrap();
+        let page = doc.get_object(page_id).unwrap().as_dict().unwrap();
+        let annots = page.get(b"Annots").unwrap().as_array().unwrap();
+
+        assert_eq!(report.links_written, 1);
+        assert_eq!(annots.len(), 1);
+    }
+
+    #[test]
+    fn flatten_command_removes_interactive_page_annotations() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("input.pdf");
+        let linked = dir.path().join("linked.pdf");
+        let flattened = dir.path().join("flattened.pdf");
+        std::fs::write(&input, minimal_two_page_pdf_bytes()).unwrap();
+        let links = vec![LinkProposal {
+            from_page: 0,
+            target_page: 1,
+            rect: crate::core::links::PdfRect {
+                x: 20.0,
+                y: 30.0,
+                width: 40.0,
+                height: 12.0,
+            },
+            label: "A-102".to_owned(),
+        }];
+        LopdfEditEngine
+            .write_links(&input, &linked, &links)
+            .unwrap();
+
+        let report = LopdfEditEngine
+            .flatten_interactive_annotations(&linked, &flattened)
+            .unwrap();
+        let doc = Document::load(&flattened).unwrap();
+        let page_id = *doc.get_pages().get(&1).unwrap();
+        let page = doc.get_object(page_id).unwrap().as_dict().unwrap();
+
+        assert_eq!(report.annotations_removed, 1);
+        assert!(page.get(b"Annots").is_err());
+    }
+
     fn minimal_pdf_bytes() -> Vec<u8> {
         let objects = [
             "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
@@ -542,6 +870,33 @@ mod tests {
         }
         pdf.push_str(&format!(
             "trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n"
+        ));
+        pdf.into_bytes()
+    }
+
+    fn minimal_two_page_pdf_bytes() -> Vec<u8> {
+        let objects = [
+            "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
+            "2 0 obj\n<< /Type /Pages /Kids [3 0 R 6 0 R] /Count 2 >>\nendobj\n",
+            "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>\nendobj\n",
+            "4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n",
+            "5 0 obj\n<< /Length 41 >>\nstream\nBT /F1 24 Tf 50 110 Td (Page 1) Tj ET\nendstream\nendobj\n",
+            "6 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << /Font << /F1 4 0 R >> >> /Contents 7 0 R >>\nendobj\n",
+            "7 0 obj\n<< /Length 41 >>\nstream\nBT /F1 24 Tf 50 110 Td (Page 2) Tj ET\nendstream\nendobj\n",
+        ];
+        let mut pdf = String::from("%PDF-1.4\n");
+        let mut offsets = vec![0usize];
+        for object in objects {
+            offsets.push(pdf.len());
+            pdf.push_str(object);
+        }
+        let xref_offset = pdf.len();
+        pdf.push_str("xref\n0 8\n0000000000 65535 f \n");
+        for offset in offsets.iter().skip(1) {
+            pdf.push_str(&format!("{offset:010} 00000 n \n"));
+        }
+        pdf.push_str(&format!(
+            "trailer\n<< /Size 8 /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n"
         ));
         pdf.into_bytes()
     }
