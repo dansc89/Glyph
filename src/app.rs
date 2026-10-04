@@ -390,13 +390,22 @@ impl eframe::App for GlyphApp {
             .frame(
                 egui::Frame::new()
                     .fill(theme::SURFACE)
-                    .stroke(egui::Stroke::new(1.0, theme::STROKE))
-                    .inner_margin(egui::Margin::symmetric(12, 7)),
+                    .stroke(egui::Stroke::new(1.0, theme::STROKE_STRONG))
+                    .inner_margin(egui::Margin::symmetric(12, 8)),
             )
             .show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
                     ui.label(
+                        egui::RichText::new("GLYPH")
+                            .monospace()
+                            .strong()
+                            .size(13.0)
+                            .color(theme::ACCENT_STRONG),
+                    );
+                    ui.separator();
+                    ui.label(
                         egui::RichText::new(self.window_title())
+                            .monospace()
                             .size(13.0)
                             .color(theme::TEXT),
                     );
@@ -420,7 +429,7 @@ impl eframe::App for GlyphApp {
             .frame(
                 egui::Frame::new()
                     .fill(theme::PANEL)
-                    .stroke(egui::Stroke::new(1.0, theme::STROKE))
+                    .stroke(egui::Stroke::new(1.0, theme::STROKE_STRONG))
                     .inner_margin(egui::Margin::symmetric(10, 12)),
             )
             .show(ui, |ui| {
@@ -430,34 +439,50 @@ impl eframe::App for GlyphApp {
                         let page_count = document.summary.page_count;
                         let pages = document.summary.pages.clone();
                         let bookmarks = document.summary.bookmarks.clone();
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                egui::RichText::new(display_name)
-                                    .size(13.0)
-                                    .color(theme::TEXT),
-                            );
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
+                        egui::Frame::new()
+                            .fill(theme::CARD)
+                            .stroke(egui::Stroke::new(1.0, theme::STROKE))
+                            .corner_radius(egui::CornerRadius::same(4))
+                            .inner_margin(egui::Margin::symmetric(10, 8))
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
                                     ui.label(
-                                        egui::RichText::new(format_page_counter(
-                                            self.project.selected_page,
-                                            page_count,
-                                        ))
-                                        .size(12.0)
-                                        .color(theme::TEXT_MUTED),
+                                        egui::RichText::new("PDF")
+                                            .monospace()
+                                            .strong()
+                                            .size(11.0)
+                                            .color(theme::ACCENT),
                                     );
-                                },
-                            );
-                        });
-                        ui.add_space(7.0);
+                                    ui.label(
+                                        egui::RichText::new(display_name)
+                                            .monospace()
+                                            .size(13.0)
+                                            .strong()
+                                            .color(theme::TEXT),
+                                    );
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            ui.label(
+                                                egui::RichText::new(format_page_counter(
+                                                    self.project.selected_page,
+                                                    page_count,
+                                                ))
+                                                .size(12.0)
+                                                .color(theme::TEXT_MUTED),
+                                            );
+                                        },
+                                    );
+                                });
+                            });
+                        ui.add_space(8.0);
                         ui.horizontal(|ui| {
                             if ui
                                 .add_enabled(
                                     self.can_go_previous(),
-                                    egui::Button::new("Previous")
+                                    egui::Button::new("← Prev")
                                         .fill(theme::CONTROL)
-                                        .corner_radius(5),
+                                        .corner_radius(4),
                                 )
                                 .clicked()
                             {
@@ -466,16 +491,16 @@ impl eframe::App for GlyphApp {
                             if ui
                                 .add_enabled(
                                     self.can_go_next(),
-                                    egui::Button::new("Next")
+                                    egui::Button::new("Next →")
                                         .fill(theme::CONTROL)
-                                        .corner_radius(5),
+                                        .corner_radius(4),
                                 )
                                 .clicked()
                             {
                                 self.next_page(&ctx);
                             }
                         });
-                        ui.add_space(14.0);
+                        ui.add_space(12.0);
 
                         ui.horizontal(|ui| {
                             if nav_tab_button(
@@ -543,7 +568,7 @@ impl eframe::App for GlyphApp {
                         egui::Frame::new()
                             .fill(theme::CARD)
                             .stroke(egui::Stroke::new(1.0, theme::STROKE))
-                            .corner_radius(egui::CornerRadius::same(10))
+                            .corner_radius(egui::CornerRadius::same(4))
                             .inner_margin(egui::Margin::same(14))
                             .show(ui, |ui| {
                                 ui.label(
@@ -566,11 +591,12 @@ impl eframe::App for GlyphApp {
             .frame(
                 egui::Frame::new()
                     .fill(theme::PANEL)
-                    .stroke(egui::Stroke::new(1.0, theme::STROKE))
+                    .stroke(egui::Stroke::new(1.0, theme::STROKE_STRONG))
                     .inner_margin(egui::Margin::symmetric(12, 6)),
             )
             .show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
+                    ui.label(egui::RichText::new("▣").color(theme::ACCENT));
                     ui.label(egui::RichText::new(&self.status).color(theme::TEXT_MUTED));
                     ui.separator();
                     ui.label(
@@ -589,24 +615,31 @@ impl eframe::App for GlyphApp {
                     .inner_margin(egui::Margin::same(14)),
             )
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    if tool_chip(ui, "−").clicked() {
-                        self.zoom = (self.zoom * 0.9).max(MIN_ZOOM);
-                        self.last_view_change = Some(Instant::now());
-                    }
-                    metric_pill(ui, &format_zoom_label(self.zoom));
-                    if tool_chip(ui, "+").clicked() {
-                        self.zoom = (self.zoom * 1.1).min(MAX_ZOOM);
-                        self.last_view_change = Some(Instant::now());
-                    }
-                    ui.add_space(8.0);
-                    if tool_chip(ui, "Fit page").clicked() {
-                        self.fit_to_page_requested = true;
-                    }
-                    if tool_chip(ui, "Reset").clicked() {
-                        self.reset_view();
-                    }
-                });
+                egui::Frame::new()
+                    .fill(theme::PANEL)
+                    .stroke(egui::Stroke::new(1.0, theme::STROKE))
+                    .corner_radius(egui::CornerRadius::same(4))
+                    .inner_margin(egui::Margin::symmetric(8, 6))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            if tool_chip(ui, "−").clicked() {
+                                self.zoom = (self.zoom * 0.9).max(MIN_ZOOM);
+                                self.last_view_change = Some(Instant::now());
+                            }
+                            metric_pill(ui, &format_zoom_label(self.zoom));
+                            if tool_chip(ui, "+").clicked() {
+                                self.zoom = (self.zoom * 1.1).min(MAX_ZOOM);
+                                self.last_view_change = Some(Instant::now());
+                            }
+                            ui.add_space(8.0);
+                            if tool_chip(ui, "Fit page").clicked() {
+                                self.fit_to_page_requested = true;
+                            }
+                            if tool_chip(ui, "Reset").clicked() {
+                                self.reset_view();
+                            }
+                        });
+                    });
                 ui.add_space(12.0);
 
                 let available = ui.available_size();
@@ -833,11 +866,29 @@ fn format_page_counter(selected_page: usize, page_count: usize) -> String {
 }
 
 fn draw_canvas_backdrop(painter: &egui::Painter, rect: egui::Rect) {
-    painter.rect_filled(rect, 10.0, theme::CANVAS);
+    painter.rect_filled(rect, 6.0, theme::CANVAS);
+    let grid_color = theme::translucent(theme::STROKE_STRONG, 42);
+    let step = 36.0;
+    let mut x = rect.left() + step;
+    while x < rect.right() {
+        painter.line_segment(
+            [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
+            egui::Stroke::new(1.0, grid_color),
+        );
+        x += step;
+    }
+    let mut y = rect.top() + step;
+    while y < rect.bottom() {
+        painter.line_segment(
+            [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
+            egui::Stroke::new(1.0, grid_color),
+        );
+        y += step;
+    }
     painter.rect_stroke(
         rect,
-        10.0,
-        egui::Stroke::new(1.0, theme::STROKE),
+        6.0,
+        egui::Stroke::new(1.0, theme::STROKE_STRONG),
         egui::StrokeKind::Inside,
     );
 }
@@ -847,7 +898,7 @@ fn tool_chip(ui: &mut egui::Ui, label: &str) -> egui::Response {
         egui::Button::new(egui::RichText::new(label).color(theme::TEXT).size(12.0))
             .fill(theme::PANEL_RAISED)
             .stroke(egui::Stroke::new(1.0, theme::STROKE))
-            .corner_radius(egui::CornerRadius::same(6))
+            .corner_radius(egui::CornerRadius::same(4))
             .min_size(egui::vec2(36.0, 26.0)),
     )
 }
@@ -856,7 +907,7 @@ fn metric_pill(ui: &mut egui::Ui, label: &str) {
     egui::Frame::new()
         .fill(theme::PANEL_RAISED)
         .stroke(egui::Stroke::new(1.0, theme::STROKE))
-        .corner_radius(egui::CornerRadius::same(6))
+        .corner_radius(egui::CornerRadius::same(4))
         .inner_margin(egui::Margin::symmetric(10, 5))
         .show(ui, |ui| {
             ui.label(
@@ -869,12 +920,12 @@ fn metric_pill(ui: &mut egui::Ui, label: &str) {
 
 fn nav_tab_button(ui: &mut egui::Ui, label: &str, selected: bool) -> egui::Response {
     let fill = if selected {
-        theme::ACCENT
+        theme::ACCENT_SOFT
     } else {
         theme::PANEL_RAISED
     };
     let text = if selected {
-        egui::Color32::WHITE
+        theme::ACCENT_STRONG
     } else {
         theme::TEXT_MUTED
     };
@@ -882,8 +933,15 @@ fn nav_tab_button(ui: &mut egui::Ui, label: &str, selected: bool) -> egui::Respo
         egui::Button::new(egui::RichText::new(label).strong().color(text).size(12.0))
             .selected(selected)
             .fill(fill)
-            .stroke(egui::Stroke::new(1.0, theme::STROKE))
-            .corner_radius(egui::CornerRadius::same(6))
+            .stroke(egui::Stroke::new(
+                1.0,
+                if selected {
+                    theme::ACCENT
+                } else {
+                    theme::STROKE
+                },
+            ))
+            .corner_radius(egui::CornerRadius::same(4))
             .min_size(egui::vec2((ui.available_width() - 6.0) / 2.0, 30.0)),
     )
 }
@@ -900,12 +958,12 @@ fn section_header(ui: &mut egui::Ui, label: &str) {
 
 fn page_row(ui: &mut egui::Ui, label: &str, selected: bool) -> egui::Response {
     let fill = if selected {
-        theme::ACCENT
+        theme::ACCENT_SOFT
     } else {
         theme::PANEL_RAISED
     };
     let text = if selected {
-        egui::Color32::WHITE
+        theme::ACCENT_STRONG
     } else {
         theme::TEXT
     };
@@ -918,8 +976,15 @@ fn page_row(ui: &mut egui::Ui, label: &str, selected: bool) -> egui::Response {
         )
         .selected(selected)
         .fill(fill)
-        .stroke(egui::Stroke::new(1.0, theme::STROKE))
-        .corner_radius(egui::CornerRadius::same(6))
+        .stroke(egui::Stroke::new(
+            1.0,
+            if selected {
+                theme::ACCENT
+            } else {
+                theme::STROKE
+            },
+        ))
+        .corner_radius(egui::CornerRadius::same(4))
         .min_size(egui::vec2(ui.available_width(), 28.0)),
     )
 }
@@ -932,12 +997,12 @@ fn bookmark_row(
     selected: bool,
 ) -> egui::Response {
     let fill = if selected {
-        theme::ACCENT
+        theme::ACCENT_SOFT
     } else {
         theme::PANEL_RAISED
     };
     let text = if selected {
-        egui::Color32::WHITE
+        theme::ACCENT_STRONG
     } else if page_index.is_some() {
         theme::TEXT
     } else {
@@ -949,8 +1014,15 @@ fn bookmark_row(
         egui::Button::new(egui::RichText::new(label).color(text).size(13.0))
             .selected(selected)
             .fill(fill)
-            .stroke(egui::Stroke::new(1.0, theme::STROKE))
-            .corner_radius(egui::CornerRadius::same(6))
+            .stroke(egui::Stroke::new(
+                1.0,
+                if selected {
+                    theme::ACCENT
+                } else {
+                    theme::STROKE
+                },
+            ))
+            .corner_radius(egui::CornerRadius::same(4))
             .min_size(egui::vec2(ui.available_width(), 28.0)),
     )
 }
@@ -966,7 +1038,7 @@ fn empty_sidebar_note(ui: &mut egui::Ui, note: &str) {
     egui::Frame::new()
         .fill(theme::SURFACE)
         .stroke(egui::Stroke::new(1.0, theme::STROKE))
-        .corner_radius(egui::CornerRadius::same(8))
+        .corner_radius(egui::CornerRadius::same(4))
         .inner_margin(egui::Margin::same(12))
         .show(ui, |ui| {
             ui.label(
@@ -980,12 +1052,17 @@ fn empty_sidebar_note(ui: &mut egui::Ui, note: &str) {
 fn draw_empty_state(ui: &mut egui::Ui, rect: egui::Rect) {
     let painter = ui.painter_at(rect);
     let panel = egui::Rect::from_center_size(rect.center(), egui::vec2(420.0, 150.0));
-    painter.rect_filled(panel, 8.0, theme::PANEL);
+    painter.rect_filled(panel, 6.0, theme::PANEL);
     painter.rect_stroke(
         panel,
-        8.0,
+        6.0,
         egui::Stroke::new(1.0, theme::STROKE),
         egui::StrokeKind::Inside,
+    );
+    painter.rect_filled(
+        egui::Rect::from_min_size(panel.min, egui::vec2(4.0, panel.height())),
+        0.0,
+        theme::ACCENT,
     );
     painter.text(
         panel.center_top() + egui::vec2(0.0, 42.0),
