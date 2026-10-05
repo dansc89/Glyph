@@ -29,7 +29,7 @@ Glyph is **not** a web wrapper. It is a native Rust desktop app.
 Easiest path today:
 
 ```bash
-curl -fsSL https://github.com/dansc89/Glyph/releases/download/1.1/install-glyph-arch.sh | sh
+curl -fsSL https://github.com/dansc89/Glyph/releases/download/1.2/install-glyph-arch.sh | sh
 glyph
 ```
 

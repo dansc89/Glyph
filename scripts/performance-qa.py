@@ -12,6 +12,12 @@ import re
 from PIL import Image, ImageChops
 
 
+def pixels(image):
+    """Pillow 10/11 compatibility without deprecated calls on Pillow 12."""
+    method = getattr(image, "get_flattened_data", None) or image.getdata
+    return method()
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--binary", type=Path, required=True)
@@ -62,7 +68,7 @@ def main():
             path = screenshot(name)
             # Only the PDF viewport, not the highlighted sidebar, contributes.
             image = Image.open(path).convert("RGB").crop((340, 120, 1425, 870))
-            matches = sum(all(abs(v - target) <= 35 for v, target in zip(pixel, color)) for pixel in image.get_flattened_data())
+            matches = sum(all(abs(v - target) <= 35 for v, target in zip(pixel, color)) for pixel in pixels(image))
             if matches > 1000:
                 results.append({"action": name, "passed": True, "matching_pixels": matches, "observed_seconds_including_capture": time.monotonic() - start})
                 return
@@ -77,7 +83,7 @@ def main():
             path = screenshot(name)
             current = Image.open(path).convert("RGB").crop((340, 240, 1425, 870))
             if previous is not None:
-                changed = sum(any(v > 20 for v in px) for px in ImageChops.difference(previous, current).get_flattened_data())
+                changed = sum(any(v > 20 for v in px) for px in pixels(ImageChops.difference(previous, current)))
                 stable_frames = stable_frames + 1 if changed < 100 else 0
                 if stable_frames >= 2:
                     return current
@@ -152,7 +158,7 @@ def main():
         run("xdotool", "key", "alt+Left")
         wait_page("01j-history-restored-view", (140, 51, 242))
         restored_view = stable_view("01j-history-restored-view")
-        changed = sum(any(v > 20 for v in px) for px in ImageChops.difference(source_view, restored_view).get_flattened_data())
+        changed = sum(any(v > 20 for v in px) for px in pixels(ImageChops.difference(source_view, restored_view)))
         assert changed < 100, f"history did not restore viewport: {changed} changed pixels"
         results.append({"action": "history-restores-zoom-and-pan", "passed": True, "changed_pixels": changed})
         import csv, io
