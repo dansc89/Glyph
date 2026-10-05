@@ -1,4 +1,7 @@
 /target/
+/dist/
+__pycache__/
+*.pyc
 /.idea/
 /.vscode/
 *.log

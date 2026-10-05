@@ -1,14 +1,27 @@
+mod automation;
+mod render_worker;
+#[cfg(test)]
+mod shortcut_tests;
+mod text_selection;
+mod text_view;
+mod thumbnails;
+use crate::core::navigation::NavigationHistory;
 use crate::core::project::ProjectState;
-use crate::core::sheet::{SheetCandidate, SheetId, generate_bookmark_titles, normalize_sheet_id};
-use crate::pdf::{
-    LopdfEditEngine, LopdfInspectionEngine, PdfEngine, PdfError, PdfRenderEngine,
-    PdfiumRenderEngine, RenderedPage, RenderedTile, TileRequest,
-};
+use crate::pdf::PdfInternalLink;
+use crate::pdf::overlay::normalize_rectangles;
+use crate::pdf::search::{MAX_SEARCH_HITS, PdfSearchHit, search_pdf};
+use crate::pdf::{PdfError, RenderedPage, RenderedTile, TileRequest};
 use crate::theme;
+use automation::{AutomationFeedback, AutomationKind, AutomationOutcome};
 use eframe::egui;
+use render_worker::{JobKind, RenderJob, RenderWorker};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -21,6 +34,7 @@ const TILE_RENDER_MAX_EDGE: usize = 2048;
 const TILE_RENDER_MARGIN: f32 = 0.06;
 const MAX_TILE_FULL_WIDTH: usize = 32_768;
 const PAGE_CACHE_LIMIT: usize = 7;
+const PAGE_CACHE_BYTE_BUDGET: usize = 128 * 1024 * 1024;
 const PAGE_PREFETCH_RADIUS: usize = 2;
 const MIN_ZOOM: f32 = 0.1;
 const MAX_ZOOM: f32 = 8.0;
@@ -29,29 +43,81 @@ const MAX_ZOOM: f32 = 8.0;
 enum NavigationTab {
     Pages,
     Bookmarks,
+    Search,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum FitMode {
+    #[default]
+    Manual,
+    Page,
+    Width,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ViewLocation {
+    page: usize,
+    zoom: f32,
+    pan: egui::Vec2,
+    fit_mode: FitMode,
+}
+
+type AutomationReceiver = (
+    u64,
+    PathBuf,
+    mpsc::Receiver<Result<AutomationOutcome, PdfError>>,
+);
 
 pub struct GlyphApp {
     project: ProjectState,
     status: String,
     zoom: f32,
     pan: egui::Vec2,
-    inspector: LopdfInspectionEngine,
-    renderer: PdfiumRenderEngine,
-    editor: LopdfEditEngine,
-    rendered_page: Option<RenderedPage>,
+    loading_document: Option<u64>,
+    automation_rx: Option<AutomationReceiver>,
+    automation_feedback: Option<AutomationFeedback>,
+    rendered_page: Option<Arc<RenderedPage>>,
     page_texture: Option<egui::TextureHandle>,
-    page_cache: HashMap<usize, RenderedPage>,
+    page_cache: HashMap<usize, Arc<RenderedPage>>,
+    page_texture_cache: HashMap<usize, egui::TextureHandle>,
     page_cache_order: VecDeque<usize>,
     rendered_tile: Option<RenderedTile>,
     tile_texture: Option<egui::TextureHandle>,
     page_aspect_ratio: Option<f32>,
     fit_to_page_requested: bool,
+    fit_to_width_requested: bool,
+    fit_mode: FitMode,
+    fitted_viewport: Option<(egui::Vec2, usize)>,
     last_canvas_pointer: Option<egui::Pos2>,
     last_view_change: Option<Instant>,
     navigation_tab: NavigationTab,
     sidebar_collapsed: bool,
-    render_result_tx: mpsc::Sender<RenderJobResult>,
+    navigation_history: NavigationHistory<ViewLocation>,
+    page_links: Vec<PdfInternalLink>,
+    link_cache: HashMap<(u64, usize), Vec<PdfInternalLink>>,
+    link_cache_order: VecDeque<(u64, usize)>,
+    pending_links: Option<(u64, usize)>,
+    show_link_highlights: bool,
+    search_query: String,
+    search_hits: Vec<PdfSearchHit>,
+    selected_search_hit: Option<usize>,
+    search_focus_requested: bool,
+    page_entry: String,
+    page_entry_focus_requested: bool,
+    search_cancel: Arc<AtomicBool>,
+    search_job_id: u64,
+    search_running: bool,
+    search_progress: (usize, usize),
+    search_result_tx: mpsc::Sender<SearchMessage>,
+    search_result_rx: mpsc::Receiver<SearchMessage>,
+    thumbnails: thumbnails::ThumbnailState,
+    page_text: Option<Arc<crate::pdf::PageText>>,
+    pending_text: Option<(u64, usize)>,
+    text_error: Option<String>,
+    selection: text_selection::TextSelection,
+    selecting_text: bool,
+    render_worker: RenderWorker,
+    document_generation: u64,
     render_result_rx: mpsc::Receiver<RenderJobResult>,
     next_render_job_id: u64,
     pending_page_render: Option<PendingPageRender>,
@@ -74,8 +140,48 @@ struct PendingTileRender {
     request: TileRequest,
 }
 
+enum SearchMessage {
+    Progress {
+        id: u64,
+        done: usize,
+        total: usize,
+    },
+    Finished {
+        id: u64,
+        cancelled: bool,
+        result: Result<Vec<PdfSearchHit>, PdfError>,
+    },
+}
+
 enum RenderJobResult {
+    Text {
+        id: u64,
+        generation: u64,
+        path: PathBuf,
+        page_index: usize,
+        result: Result<crate::pdf::PageText, PdfError>,
+    },
+    Thumbnail {
+        id: u64,
+        generation: u64,
+        path: PathBuf,
+        page_index: usize,
+        result: Result<RenderedPage, PdfError>,
+    },
+    Links {
+        id: u64,
+        generation: u64,
+        path: PathBuf,
+        page_index: usize,
+        result: Result<Vec<PdfInternalLink>, PdfError>,
+    },
+    Inspection {
+        id: u64,
+        path: PathBuf,
+        result: Result<crate::pdf::PdfDocumentSummary, PdfError>,
+    },
     Page {
+        generation: u64,
         id: u64,
         path: PathBuf,
         page_index: usize,
@@ -83,12 +189,14 @@ enum RenderJobResult {
         result: Result<RenderedPage, PdfError>,
     },
     Tile {
+        generation: u64,
         id: u64,
         path: PathBuf,
         request: TileRequest,
         result: Result<RenderedTile, PdfError>,
     },
     PrefetchPage {
+        generation: u64,
         path: PathBuf,
         page_index: usize,
         target_width: u16,
@@ -98,29 +206,63 @@ enum RenderJobResult {
 
 impl GlyphApp {
     pub fn new(cc: &eframe::CreationContext<'_>, initial_pdf: Option<PathBuf>) -> Self {
-        theme::install(&cc.egui_ctx);
-        let (render_result_tx, render_result_rx) = mpsc::channel();
+        Self::with_context(&cc.egui_ctx, initial_pdf)
+    }
+
+    fn with_context(ctx: &egui::Context, initial_pdf: Option<PathBuf>) -> Self {
+        theme::install(ctx);
+        let (render_worker, render_result_rx) = RenderWorker::new(ctx);
+        let (search_result_tx, search_result_rx) = mpsc::channel();
         let mut app = Self {
             project: ProjectState::new("Untitled Glyph Set"),
             status: "Ready — drop a PDF or press Ctrl+O.".to_owned(),
             zoom: 1.0,
             pan: egui::Vec2::ZERO,
-            inspector: LopdfInspectionEngine,
-            renderer: PdfiumRenderEngine,
-            editor: LopdfEditEngine,
+            loading_document: None,
+            automation_rx: None,
+            automation_feedback: None,
             rendered_page: None,
             page_texture: None,
             page_cache: HashMap::new(),
+            page_texture_cache: HashMap::new(),
             page_cache_order: VecDeque::new(),
             rendered_tile: None,
             tile_texture: None,
             page_aspect_ratio: None,
             fit_to_page_requested: false,
+            fit_to_width_requested: false,
+            fit_mode: FitMode::Manual,
+            fitted_viewport: None,
             last_canvas_pointer: None,
             last_view_change: None,
             navigation_tab: NavigationTab::Pages,
             sidebar_collapsed: false,
-            render_result_tx,
+            navigation_history: NavigationHistory::default(),
+            page_links: Vec::new(),
+            link_cache: HashMap::new(),
+            link_cache_order: VecDeque::new(),
+            pending_links: None,
+            show_link_highlights: true,
+            search_query: String::new(),
+            search_hits: Vec::new(),
+            selected_search_hit: None,
+            search_focus_requested: false,
+            page_entry: String::new(),
+            page_entry_focus_requested: false,
+            search_cancel: Arc::new(AtomicBool::new(false)),
+            search_job_id: 0,
+            search_running: false,
+            search_progress: (0, 0),
+            search_result_tx,
+            search_result_rx,
+            thumbnails: thumbnails::ThumbnailState::default(),
+            page_text: None,
+            pending_text: None,
+            text_error: None,
+            selection: text_selection::TextSelection::default(),
+            selecting_text: false,
+            render_worker,
+            document_generation: 0,
             render_result_rx,
             next_render_job_id: 1,
             pending_page_render: None,
@@ -128,7 +270,7 @@ impl GlyphApp {
             pending_tile_render: None,
         };
         if let Some(path) = initial_pdf {
-            app.open_pdf(path, &cc.egui_ctx);
+            app.open_pdf(path, ctx);
         }
         app
     }
@@ -143,17 +285,62 @@ impl GlyphApp {
         }
     }
 
-    fn open_pdf(&mut self, path: PathBuf, ctx: &egui::Context) {
-        match self.inspector.inspect(&path) {
+    fn open_pdf(&mut self, path: PathBuf, _ctx: &egui::Context) {
+        let id = self.next_render_job_id;
+        self.next_render_job_id = self.next_render_job_id.wrapping_add(1).max(1);
+        self.clear_page_text();
+        self.loading_document = Some(id);
+        self.thumbnails = thumbnails::ThumbnailState::default();
+        self.render_worker.set_thumbnails(Vec::new());
+        self.fit_to_page_requested = false;
+        self.fit_to_width_requested = false;
+        self.pending_links = None;
+        self.pending_page_render = None;
+        self.pending_tile_render = None;
+        self.pending_prefetch_pages.clear();
+        self.render_worker.submit(RenderJob {
+            id,
+            generation: self.document_generation,
+            path: path.clone(),
+            kind: JobKind::Inspect,
+        });
+        self.status = format!("Loading {}…", path.display());
+    }
+
+    fn apply_inspection(
+        &mut self,
+        id: u64,
+        path: PathBuf,
+        result: Result<crate::pdf::PdfDocumentSummary, PdfError>,
+        ctx: &egui::Context,
+    ) {
+        if self.loading_document != Some(id) {
+            return;
+        }
+        self.loading_document = None;
+        match result {
             Ok(summary) => {
+                self.cancel_search();
+                self.search_hits.clear();
+                self.selected_search_hit = None;
+                self.navigation_history = NavigationHistory::default();
+                self.page_links.clear();
+                self.link_cache.clear();
+                self.link_cache_order.clear();
+                self.pending_links = None;
+                self.document_generation = self.document_generation.wrapping_add(1).max(1);
+                self.render_worker.reset(self.document_generation);
                 self.project.open_document(path.clone(), summary);
                 self.zoom = 1.0;
                 self.pan = egui::Vec2::ZERO;
+                self.fit_to_page_requested = true;
+                self.fit_to_width_requested = false;
                 self.rendered_page = None;
                 self.page_texture = None;
                 self.rendered_tile = None;
                 self.tile_texture = None;
                 self.page_cache.clear();
+                self.page_texture_cache.clear();
                 self.page_cache_order.clear();
                 self.page_aspect_ratio = None;
                 self.last_view_change = None;
@@ -162,8 +349,15 @@ impl GlyphApp {
                 self.pending_tile_render = None;
                 self.status = format!("Loaded {}", path.display());
                 self.render_selected_page(ctx, BASE_RENDER_WIDTH);
+                self.queue_page_links(ctx);
+                self.queue_page_text();
             }
             Err(err) => {
+                if self.project.document.is_some() {
+                    self.render_selected_page(ctx, BASE_RENDER_WIDTH);
+                    self.queue_page_links(ctx);
+                    self.queue_page_text();
+                }
                 self.status = format!("Load failed: {err}");
             }
         }
@@ -176,22 +370,22 @@ impl GlyphApp {
         let path = document.path.clone();
         let page_index = self.project.selected_page;
         if let Some(cached) = self.cached_page(page_index, target_width) {
+            self.render_worker.set_view(page_index);
+            self.pending_links = None;
+            self.pending_page_render = None;
+            self.pending_tile_render = None;
+            self.pending_prefetch_pages.clear();
             self.install_texture(ctx, cached);
             self.status = format!("Page {} ready — cached", page_index + 1);
-            self.queue_adjacent_page_prefetch(ctx);
+            self.queue_page_links(ctx);
+            self.queue_adjacent_page_prefetch();
             return;
         }
         self.status = format!("Rendering page {}…", page_index + 1);
-        self.queue_page_render(ctx, path, page_index, target_width);
+        self.queue_page_render(path, page_index, target_width);
     }
 
-    fn queue_page_render(
-        &mut self,
-        ctx: &egui::Context,
-        path: PathBuf,
-        page_index: usize,
-        target_width: u16,
-    ) {
+    fn queue_page_render(&mut self, path: PathBuf, page_index: usize, target_width: u16) {
         if self.pending_page_render.as_ref().is_some_and(|pending| {
             pending.path == path
                 && pending.page_index == page_index
@@ -208,29 +402,26 @@ impl GlyphApp {
             page_index,
             target_width,
         });
-        let tx = self.render_result_tx.clone();
-        let renderer = self.renderer;
-        let egui_ctx = ctx.clone();
-        thread::spawn(move || {
-            let result = renderer.render_page(&path, page_index, target_width);
-            let _ = tx.send(RenderJobResult::Page {
-                id,
-                path,
+        self.pending_prefetch_pages.clear();
+        self.pending_tile_render = None;
+        self.render_worker.submit(RenderJob {
+            id,
+            generation: self.document_generation,
+            path,
+            kind: JobKind::Page {
                 page_index,
                 target_width,
-                result,
-            });
-            egui_ctx.request_repaint();
+            },
         });
     }
 
-    fn cached_page(&self, page_index: usize, target_width: u16) -> Option<RenderedPage> {
+    fn cached_page(&self, page_index: usize, target_width: u16) -> Option<Arc<RenderedPage>> {
         self.page_cache.get(&page_index).and_then(|rendered| {
             (rendered.width as f32 >= target_width as f32 * 0.95).then(|| rendered.clone())
         })
     }
 
-    fn cache_rendered_page(&mut self, rendered: RenderedPage) {
+    fn cache_rendered_page(&mut self, rendered: Arc<RenderedPage>) {
         let page_index = rendered.page_index;
         let should_replace = self
             .page_cache
@@ -240,20 +431,31 @@ impl GlyphApp {
         if !should_replace {
             return;
         }
-        if !self.page_cache.contains_key(&page_index) {
-            self.page_cache_order.push_back(page_index);
+        self.page_cache_order.retain(|index| *index != page_index);
+        self.page_texture_cache.remove(&page_index);
+        // Reserve the raster plus an eventual GPU copy. Oversized pages stay only in the active view.
+        self.page_cache.remove(&page_index);
+        if rendered.rgba.len().saturating_mul(2) > PAGE_CACHE_BYTE_BUDGET {
+            return;
         }
+        self.page_cache_order.push_back(page_index);
         self.page_cache.insert(page_index, rendered);
-        while self.page_cache_order.len() > PAGE_CACHE_LIMIT {
+        while self.page_cache_order.len() > PAGE_CACHE_LIMIT
+            || self
+                .page_cache
+                .values()
+                .map(|page| page.rgba.len().saturating_mul(2))
+                .sum::<usize>()
+                > PAGE_CACHE_BYTE_BUDGET
+        {
             if let Some(evicted) = self.page_cache_order.pop_front() {
-                if evicted != self.project.selected_page {
-                    self.page_cache.remove(&evicted);
-                }
+                self.page_cache.remove(&evicted);
+                self.page_texture_cache.remove(&evicted);
             }
         }
     }
 
-    fn queue_adjacent_page_prefetch(&mut self, ctx: &egui::Context) {
+    fn queue_adjacent_page_prefetch(&mut self) {
         let Some(document) = &self.project.document else {
             return;
         };
@@ -280,39 +482,48 @@ impl GlyphApp {
         let path = document.path.clone();
         for page_index in targets {
             self.pending_prefetch_pages.insert(page_index);
-            let tx = self.render_result_tx.clone();
-            let path = path.clone();
-            let renderer = self.renderer;
-            let egui_ctx = ctx.clone();
-            thread::spawn(move || {
-                let result = renderer.render_page(&path, page_index, BASE_RENDER_WIDTH);
-                let _ = tx.send(RenderJobResult::PrefetchPage {
-                    path,
+            self.render_worker.submit(RenderJob {
+                id: 0,
+                generation: self.document_generation,
+                path: path.clone(),
+                kind: JobKind::Prefetch {
                     page_index,
                     target_width: BASE_RENDER_WIDTH,
-                    result,
-                });
-                egui_ctx.request_repaint();
+                },
             });
         }
     }
 
-    fn install_texture(&mut self, ctx: &egui::Context, rendered: RenderedPage) {
+    fn install_texture(&mut self, ctx: &egui::Context, rendered: Arc<RenderedPage>) {
         if rendered.width > 0 {
             self.page_aspect_ratio = Some(rendered.height as f32 / rendered.width as f32);
         }
-        let image = egui::ColorImage::from_rgba_unmultiplied(
-            [rendered.width, rendered.height],
-            &rendered.rgba,
-        );
-        let texture = ctx.load_texture(
-            format!(
-                "glyph-page-{}-{}x{}",
-                rendered.page_index, rendered.width, rendered.height
-            ),
-            image,
-            egui::TextureOptions::LINEAR,
-        );
+        let texture = if let Some(texture) = self.page_texture_cache.get(&rendered.page_index) {
+            texture.clone()
+        } else {
+            let image = egui::ColorImage::from_rgba_unmultiplied(
+                [rendered.width, rendered.height],
+                &rendered.rgba,
+            );
+            let texture = ctx.load_texture(
+                format!(
+                    "glyph-page-{}-{}x{}",
+                    rendered.page_index, rendered.width, rendered.height
+                ),
+                image,
+                egui::TextureOptions::LINEAR,
+            );
+            if self.page_cache.contains_key(&rendered.page_index) {
+                self.page_texture_cache
+                    .insert(rendered.page_index, texture.clone());
+            }
+            texture
+        };
+        if self.page_cache.contains_key(&rendered.page_index) {
+            self.page_cache_order
+                .retain(|index| *index != rendered.page_index);
+            self.page_cache_order.push_back(rendered.page_index);
+        }
         self.rendered_page = Some(rendered);
         self.page_texture = Some(texture);
         self.rendered_tile = None;
@@ -322,7 +533,53 @@ impl GlyphApp {
     fn apply_render_results(&mut self, ctx: &egui::Context) {
         while let Ok(result) = self.render_result_rx.try_recv() {
             match result {
+                RenderJobResult::Text {
+                    id,
+                    generation,
+                    path,
+                    page_index,
+                    result,
+                } => self.apply_page_text_result(id, generation, path, page_index, result),
+                RenderJobResult::Thumbnail {
+                    id,
+                    generation,
+                    path,
+                    page_index,
+                    result,
+                } => self.apply_thumbnail_result(ctx, id, generation, path, page_index, result),
+                RenderJobResult::Inspection { id, path, result } => {
+                    self.apply_inspection(id, path, result, ctx)
+                }
+                RenderJobResult::Links {
+                    id,
+                    generation,
+                    path,
+                    page_index,
+                    result,
+                } => {
+                    if generation != self.document_generation
+                        || self.loading_document.is_some()
+                        || !self
+                            .project
+                            .document
+                            .as_ref()
+                            .is_some_and(|doc| doc.path == path)
+                        || self.project.selected_page != page_index
+                        || self.pending_links != Some((id, page_index))
+                    {
+                        continue;
+                    }
+                    self.pending_links = None;
+                    match result {
+                        Ok(links) => {
+                            self.cache_links(generation, page_index, links.clone());
+                            self.page_links = links;
+                        }
+                        Err(err) => self.status = format!("Link inspection failed: {err}"),
+                    }
+                }
                 RenderJobResult::Page {
+                    generation,
                     id,
                     path,
                     page_index,
@@ -341,14 +598,15 @@ impl GlyphApp {
                     if is_latest {
                         self.pending_page_render = None;
                     }
-                    if !is_current || !is_latest {
+                    if generation != self.document_generation || !is_current || !is_latest {
                         continue;
                     }
                     match result {
                         Ok(rendered) => {
+                            let rendered = Arc::new(rendered);
                             self.cache_rendered_page(rendered.clone());
                             self.install_texture(ctx, rendered);
-                            self.queue_adjacent_page_prefetch(ctx);
+                            self.queue_adjacent_page_prefetch();
                             self.status = format!(
                                 "Rendered page {} of {} — {}",
                                 page_index + 1,
@@ -362,6 +620,7 @@ impl GlyphApp {
                     }
                 }
                 RenderJobResult::Tile {
+                    generation,
                     id,
                     path,
                     request,
@@ -376,7 +635,7 @@ impl GlyphApp {
                     if is_latest {
                         self.pending_tile_render = None;
                     }
-                    if !is_current || !is_latest {
+                    if generation != self.document_generation || !is_current || !is_latest {
                         continue;
                     }
                     match result {
@@ -394,24 +653,29 @@ impl GlyphApp {
                     }
                 }
                 RenderJobResult::PrefetchPage {
+                    generation,
                     path,
                     page_index,
                     target_width,
                     result,
                 } => {
+                    if generation != self.document_generation {
+                        continue;
+                    }
                     self.pending_prefetch_pages.remove(&page_index);
                     let is_same_document = self
                         .project
                         .document
                         .as_ref()
                         .is_some_and(|document| document.path == path);
-                    if !is_same_document {
+                    if generation != self.document_generation || !is_same_document {
                         continue;
                     }
                     if target_width != BASE_RENDER_WIDTH {
                         continue;
                     }
                     if let Ok(rendered) = result {
+                        let rendered = Arc::new(rendered);
                         self.cache_rendered_page(rendered.clone());
                         if self.project.selected_page == page_index && self.page_texture.is_none() {
                             self.install_texture(ctx, rendered);
@@ -473,6 +737,14 @@ impl GlyphApp {
             .unwrap_or(false)
     }
 
+    fn manual_view_changed(&mut self) {
+        self.fit_mode = FitMode::Manual;
+        self.fitted_viewport = None;
+        self.fit_to_page_requested = false;
+        self.fit_to_width_requested = false;
+        self.mark_view_changed();
+    }
+
     fn mark_view_changed(&mut self) {
         self.last_view_change = Some(Instant::now());
         self.rendered_tile = None;
@@ -480,14 +752,34 @@ impl GlyphApp {
     }
 
     fn select_page(&mut self, page_index: usize, ctx: &egui::Context) {
+        if self.loading_document.is_some() {
+            return;
+        }
+        if let Some(count) = self.page_count() {
+            let current = self.view_location();
+            let next = ViewLocation {
+                page: page_index.min(count.saturating_sub(1)),
+                ..current
+            };
+            self.navigation_history.visit(current, next);
+        }
+        self.select_page_without_history(page_index, ctx);
+    }
+
+    fn select_page_without_history(&mut self, page_index: usize, ctx: &egui::Context) {
+        if self.loading_document.is_some() {
+            return;
+        }
         let Some(page_count) = self.page_count() else {
             return;
         };
         let page_index = page_index.min(page_count.saturating_sub(1));
         if self.project.selected_page != page_index {
+            self.clear_page_text();
             self.project.selected_page = page_index;
-            self.zoom = 1.0;
-            self.pan = egui::Vec2::ZERO;
+            self.render_worker.set_view(page_index);
+            self.pending_links = None;
+            self.page_links.clear();
             self.rendered_page = None;
             self.page_texture = None;
             self.page_aspect_ratio = None;
@@ -496,6 +788,8 @@ impl GlyphApp {
             self.pending_page_render = None;
             self.pending_tile_render = None;
             self.render_selected_page(ctx, BASE_RENDER_WIDTH);
+            self.queue_page_links(ctx);
+            self.queue_page_text();
         }
     }
 
@@ -525,6 +819,20 @@ impl GlyphApp {
         self.mark_view_changed();
     }
 
+    fn fit_width_to_rect(&mut self, rect: egui::Rect) {
+        let Some(rendered) = &self.rendered_page else {
+            return;
+        };
+        let logical_size = self.logical_page_size(rendered);
+        self.zoom = ((rect.width() - 64.0).max(100.0) / logical_size.x).clamp(MIN_ZOOM, MAX_ZOOM);
+        // Top-align tall drawings; center shorter sheets vertically.
+        self.pan = egui::vec2(
+            0.0,
+            ((logical_size.y * self.zoom - rect.height()) / 2.0 + 32.0).max(0.0),
+        );
+        self.mark_view_changed();
+    }
+
     fn logical_page_size(&self, rendered: &RenderedPage) -> egui::Vec2 {
         let aspect_ratio = self
             .page_aspect_ratio
@@ -536,6 +844,13 @@ impl GlyphApp {
     }
 
     fn ensure_render_quality(&mut self, ctx: &egui::Context) {
+        if self.loading_document.is_some() {
+            return;
+        }
+        // At high zoom only the visible tile needs high resolution, not the full drawing.
+        if self.zoom >= TILE_RENDER_TRIGGER_ZOOM {
+            return;
+        }
         if self.zoom >= TILE_RENDER_TRIGGER_ZOOM {
             return;
         }
@@ -560,7 +875,6 @@ impl GlyphApp {
             return;
         };
         self.queue_page_render(
-            ctx,
             document.path.clone(),
             self.project.selected_page,
             desired_width,
@@ -574,6 +888,9 @@ impl GlyphApp {
         viewport: egui::Rect,
         page_rect: egui::Rect,
     ) {
+        if self.loading_document.is_some() {
+            return;
+        }
         if self.zoom < TILE_RENDER_TRIGGER_ZOOM {
             self.rendered_tile = None;
             self.tile_texture = None;
@@ -621,113 +938,173 @@ impl GlyphApp {
             path: document.path.clone(),
             request,
         });
-        let tx = self.render_result_tx.clone();
-        let path = document.path.clone();
-        let renderer = self.renderer;
-        let egui_ctx = ctx.clone();
-        thread::spawn(move || {
-            let result = renderer.render_tile(&path, request);
-            let _ = tx.send(RenderJobResult::Tile {
-                id,
-                path,
-                request,
-                result,
-            });
-            egui_ctx.request_repaint();
+        self.render_worker.submit(RenderJob {
+            id,
+            generation: self.document_generation,
+            path: document.path.clone(),
+            kind: JobKind::Tile(request),
         });
     }
 
     fn generate_bookmarks_for_current_pdf(&mut self, ctx: &egui::Context) {
-        let Some(document) = &self.project.document else {
-            self.status = "Load a PDF before generating bookmarks.".to_owned();
-            return;
-        };
-        let candidates = bookmark_candidates_from_pages(&document.summary.pages);
-        let bookmarks = generate_bookmark_titles(&candidates, document.summary.page_count);
-        let output = sibling_pdf_path(&document.path, "bookmarked");
-        match self
-            .editor
-            .write_bookmarks(&document.path, &output, &bookmarks)
-        {
-            Ok(report) => {
-                let message = format!(
-                    "Generated {} bookmarks -> {}",
-                    report.bookmarks_written,
-                    report.output_path.display()
-                );
-                self.open_pdf(report.output_path, ctx);
-                self.status = message;
-                self.navigation_tab = NavigationTab::Bookmarks;
-            }
-            Err(err) => {
-                self.status = format!("Bookmark generator failed: {err}");
-            }
-        }
+        self.start_automation(AutomationKind::Bookmarks, ctx);
     }
-
     fn generate_hyperlinks_for_current_pdf(&mut self, ctx: &egui::Context) {
+        self.start_automation(AutomationKind::Hyperlinks, ctx);
+    }
+    fn start_automation(&mut self, kind: AutomationKind, ctx: &egui::Context) {
+        if self.automation_rx.is_some() || self.loading_document.is_some() {
+            return;
+        }
         let Some(document) = &self.project.document else {
-            self.status = "Load a PDF before generating hyperlinks.".to_owned();
             return;
         };
-        let candidates = bookmark_candidates_from_pages(&document.summary.pages);
-        let sheets = generate_bookmark_titles(&candidates, document.summary.page_count);
-        match self
-            .renderer
-            .generate_sheet_label_links(&document.path, &sheets)
-        {
-            Ok(links) if links.is_empty() => {
-                self.status = "No sheet-label hyperlinks found in visible PDF text.".to_owned();
-            }
-            Ok(links) => {
-                let output = sibling_pdf_path(&document.path, "hyperlinked");
-                match self.editor.write_links(&document.path, &output, &links) {
-                    Ok(report) => {
-                        let message = format!(
-                            "Generated {} hyperlinks -> {}",
-                            report.links_written,
-                            report.output_path.display()
-                        );
-                        self.open_pdf(report.output_path, ctx);
-                        self.status = message;
-                    }
-                    Err(err) => {
-                        self.status = format!("Hyperlink generator failed: {err}");
+        let path = document.path.clone();
+        let (tx, rx) = mpsc::sync_channel(1);
+        self.automation_feedback = Some(AutomationFeedback {
+            kind,
+            message: "Reading sheet numbers and drawing references…".into(),
+            output: None,
+            busy: true,
+        });
+        self.automation_rx = Some((self.document_generation, path.clone(), rx));
+        let repaint = ctx.clone();
+        thread::spawn(move || {
+            let result = automation::execute(&path, kind);
+            let _ = tx.send(result);
+            repaint.request_repaint();
+        });
+    }
+    fn apply_automation_results(&mut self, ctx: &egui::Context) {
+        let Some((generation, path, rx)) = self.automation_rx.as_ref() else {
+            return;
+        };
+        let result = match rx.try_recv() {
+            Ok(result) => result,
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => Err(PdfError::Edit(
+                "PDF processing worker stopped unexpectedly.".into(),
+            )),
+        };
+        let current = *generation == self.document_generation
+            && self.loading_document.is_none()
+            && self
+                .project
+                .document
+                .as_ref()
+                .is_some_and(|d| d.path == *path);
+        let kind = self
+            .automation_feedback
+            .as_ref()
+            .map(|f| f.kind)
+            .unwrap_or(AutomationKind::Bookmarks);
+        let source = path.display().to_string();
+        self.automation_rx = None;
+        match result {
+            Ok(outcome) => {
+                if current && let Some(output) = &outcome.output {
+                    self.open_pdf(output.clone(), ctx);
+                    if outcome.kind == AutomationKind::Bookmarks {
+                        self.navigation_tab = NavigationTab::Bookmarks;
                     }
                 }
+                let message = if current {
+                    self.status = outcome.message.clone();
+                    outcome.message
+                } else {
+                    format!("Result for previous source {source}: {}", outcome.message)
+                };
+                self.automation_feedback = Some(AutomationFeedback {
+                    kind: outcome.kind,
+                    message,
+                    output: outcome.output,
+                    busy: false,
+                });
             }
             Err(err) => {
-                self.status = format!("Hyperlink generator failed: {err}");
+                let message = if current {
+                    let message = format!("{} failed: {err}", kind.label());
+                    self.status = message.clone();
+                    message
+                } else {
+                    format!(
+                        "{} failed for previous source {source}: {err}",
+                        kind.label()
+                    )
+                };
+                self.automation_feedback = Some(AutomationFeedback {
+                    kind,
+                    message,
+                    output: None,
+                    busy: false,
+                });
             }
         }
     }
-
-    fn flatten_current_pdf(&mut self, ctx: &egui::Context) {
-        let Some(document) = &self.project.document else {
-            self.status = "Load a PDF before flattening.".to_owned();
+    fn automation_dialog(&mut self, ctx: &egui::Context) {
+        let Some(feedback) = &self.automation_feedback else {
             return;
         };
-        let output = sibling_pdf_path(&document.path, "flattened");
-        match self
-            .editor
-            .flatten_interactive_annotations(&document.path, &output)
-        {
-            Ok(report) => {
-                let message = format!(
-                    "Flattened {} annotation sets -> {}",
-                    report.annotations_removed,
-                    report.output_path.display()
-                );
-                self.open_pdf(report.output_path, ctx);
-                self.status = message;
-            }
-            Err(err) => {
-                self.status = format!("Flatten failed: {err}");
-            }
+        let mut dismiss = false;
+        egui::Window::new(format!("{} · PDF processing", feedback.kind.label()))
+            .id(egui::Id::new("automation_result"))
+            .collapsible(false)
+            .resizable(false)
+            .default_width(440.0)
+            .show(ctx, |ui| {
+                if feedback.busy {
+                    ui.spinner();
+                    ctx.request_repaint_after(Duration::from_millis(100));
+                }
+                ui.label(&feedback.message);
+                if let Some(path) = &feedback.output {
+                    ui.separator();
+                    ui.label("Saved copy:");
+                    ui.label(path.display().to_string());
+                }
+                if !feedback.busy && ui.button("Close").clicked() {
+                    dismiss = true;
+                }
+            });
+        if dismiss {
+            self.automation_feedback = None;
         }
+    }
+
+    fn apply_view_fit(&mut self, rect: egui::Rect) {
+        if self.loading_document.is_some() {
+            return;
+        }
+        let Some(page) = self.rendered_page.as_ref() else {
+            return;
+        };
+        let key = (rect.size(), page.page_index);
+        if self.fit_to_page_requested {
+            self.fit_mode = FitMode::Page;
+            self.fitted_viewport = None;
+        }
+        if self.fit_to_width_requested {
+            self.fit_mode = FitMode::Width;
+            self.fitted_viewport = None;
+        }
+        self.fit_to_page_requested = false;
+        self.fit_to_width_requested = false;
+        if self.fitted_viewport == Some(key) {
+            return;
+        }
+        match self.fit_mode {
+            FitMode::Manual => return,
+            FitMode::Page => self.fit_page_to_rect(rect),
+            FitMode::Width => self.fit_width_to_rect(rect),
+        }
+        self.fitted_viewport = Some(key);
     }
 
     fn reset_view(&mut self) {
+        self.fit_mode = FitMode::Manual;
+        self.fitted_viewport = None;
+        self.fit_to_width_requested = false;
+        self.fit_to_page_requested = false;
         self.zoom = 1.0;
         self.pan = egui::Vec2::ZERO;
         self.last_view_change = Some(Instant::now());
@@ -752,9 +1129,360 @@ impl GlyphApp {
         }
     }
 
+    fn draw_page_entry(&mut self, ui: &mut egui::Ui) {
+        let Some(count) = self.page_count().filter(|count| *count > 0) else {
+            return;
+        };
+        let id = egui::Id::new("direct-page-entry");
+        if !ui.memory(|memory| memory.has_focus(id)) {
+            self.page_entry = (self.project.selected_page + 1).to_string();
+        }
+        ui.label("Page");
+        let response = ui
+            .add_enabled(
+                self.loading_document.is_none(),
+                egui::TextEdit::singleline(&mut self.page_entry)
+                    .id(id)
+                    .desired_width(42.)
+                    .char_limit(12),
+            )
+            .on_hover_text("Enter a page number · Ctrl+G");
+        if self.page_entry_focus_requested {
+            response.request_focus();
+            let mut state = egui::TextEdit::load_state(ui.ctx(), id).unwrap_or_default();
+            state
+                .cursor
+                .set_char_range(Some(egui::text::CCursorRange::two(
+                    egui::text::CCursor::new(0),
+                    egui::text::CCursor::new(self.page_entry.chars().count()),
+                )));
+            state.store(ui.ctx(), id);
+            self.page_entry_focus_requested = false;
+        }
+        if response.lost_focus()
+            && ui.input(|input| input.key_pressed(egui::Key::Enter))
+            && self.loading_document.is_none()
+        {
+            match self.page_entry.trim().parse::<usize>() {
+                Ok(number) if number > 0 && number <= count => {
+                    self.select_page(number - 1, ui.ctx())
+                }
+                _ => self.status = format!("Enter a page number from 1 to {count}."),
+            }
+        }
+        ui.label(format!("/ {count}"));
+    }
+
+    fn search_sidebar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let response = ui.add(
+            egui::TextEdit::singleline(&mut self.search_query)
+                .hint_text("Find text in PDF · Ctrl+F")
+                .desired_width(f32::INFINITY),
+        );
+        if self.search_focus_requested {
+            response.request_focus();
+            self.search_focus_requested = false;
+        }
+        let enter = response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+        let mut search = enter;
+        ui.horizontal(|ui| {
+            if ui.button("Find").clicked() {
+                search = true;
+            }
+            if self.search_running && ui.button("Cancel").clicked() {
+                self.cancel_search();
+                self.status = "Search cancelled.".to_owned();
+            }
+        });
+        if search {
+            self.start_search(ctx);
+        }
+        if self.search_running {
+            let (done, total) = self.search_progress;
+            ui.spinner();
+            ui.label(format!("Searching page {done} / {total}"));
+        } else {
+            ui.label(format!("{} matches", self.search_hits.len()));
+            ui.small("Selectable text only; scanned pages need OCR.");
+        }
+        let mut selected = None;
+        if !self.search_hits.is_empty() {
+            ui.horizontal(|ui| {
+                let current = self.selected_search_hit.unwrap_or(0);
+                if ui.button("Previous hit").clicked() {
+                    selected =
+                        Some((current + self.search_hits.len() - 1) % self.search_hits.len());
+                }
+                if ui.button("Next hit").clicked() {
+                    selected = Some(
+                        self.selected_search_hit
+                            .map_or(0, |index| (index + 1) % self.search_hits.len()),
+                    );
+                }
+            });
+        }
+        egui::ScrollArea::vertical()
+            .id_salt("search_results")
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .id_salt("search-hits")
+                    .show_rows(ui, 28.0, self.search_hits.len(), |ui, rows| {
+                        for index in rows {
+                            let hit = &self.search_hits[index];
+                            if page_row(
+                                ui,
+                                &format!(
+                                    "{} · Page {}  {}",
+                                    index + 1,
+                                    hit.page_index + 1,
+                                    hit.text
+                                ),
+                                self.selected_search_hit == Some(index),
+                            )
+                            .clicked()
+                            {
+                                selected = Some(index);
+                            }
+                        }
+                    });
+            });
+        if let Some(index) = selected {
+            self.selected_search_hit = Some(index);
+            self.select_page(self.search_hits[index].page_index, ctx);
+            self.fit_to_page_requested = true;
+            self.fit_to_width_requested = false;
+        }
+    }
+
+    fn cancel_search(&mut self) {
+        self.search_cancel.store(true, Ordering::Relaxed);
+        self.search_job_id = self.search_job_id.wrapping_add(1);
+        self.search_running = false;
+    }
+
+    fn start_search(&mut self, ctx: &egui::Context) {
+        self.cancel_search();
+        self.search_hits.clear();
+        self.selected_search_hit = None;
+        let Some(document) = &self.project.document else {
+            return;
+        };
+        let query = self.search_query.trim().to_owned();
+        if query.is_empty() {
+            self.status = "Enter text to search.".to_owned();
+            return;
+        }
+        let path = document.path.clone();
+        let id = self.search_job_id;
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.search_cancel = cancel.clone();
+        self.search_running = true;
+        self.search_progress = (0, document.summary.page_count);
+        let tx = self.search_result_tx.clone();
+        let ctx = ctx.clone();
+        thread::spawn(move || {
+            let result = search_pdf(&path, &query, &cancel, |done, total| {
+                let _ = tx.send(SearchMessage::Progress { id, done, total });
+                ctx.request_repaint();
+            })
+            .and_then(|mut hits| {
+                let mut rects: Vec<_> = hits
+                    .iter()
+                    .flat_map(|hit| hit.rects.iter().map(move |rect| (hit.page_index, *rect)))
+                    .collect();
+                if !cancel.load(Ordering::Relaxed) {
+                    normalize_rectangles(&path, &mut rects)?;
+                }
+                let mut mapped = rects.into_iter();
+                for hit in &mut hits {
+                    for rect in &mut hit.rects {
+                        *rect = mapped.next().unwrap().1;
+                    }
+                }
+                Ok(hits)
+            });
+            let _ = tx.send(SearchMessage::Finished {
+                id,
+                cancelled: cancel.load(Ordering::Relaxed),
+                result,
+            });
+            ctx.request_repaint();
+        });
+    }
+
+    fn cache_links(&mut self, generation: u64, page_index: usize, links: Vec<PdfInternalLink>) {
+        let key = (generation, page_index);
+        self.link_cache_order.retain(|entry| *entry != key);
+        self.link_cache_order.push_back(key);
+        self.link_cache.insert(key, links);
+        while self.link_cache_order.len() > PAGE_CACHE_LIMIT {
+            if let Some(key) = self.link_cache_order.pop_front() {
+                self.link_cache.remove(&key);
+            }
+        }
+    }
+
+    fn queue_page_links(&mut self, _ctx: &egui::Context) {
+        let Some(document) = &self.project.document else {
+            return;
+        };
+        let path = document.path.clone();
+        let page_index = self.project.selected_page;
+        if let Some(links) = self.link_cache.get(&(self.document_generation, page_index)) {
+            self.page_links = links.clone();
+            return;
+        }
+        if self
+            .pending_links
+            .is_some_and(|(_, page)| page == page_index)
+        {
+            return;
+        }
+        let id = self.next_render_job_id;
+        self.next_render_job_id = self.next_render_job_id.wrapping_add(1).max(1);
+        self.pending_links = Some((id, page_index));
+        self.render_worker.submit(RenderJob {
+            id,
+            generation: self.document_generation,
+            path,
+            kind: JobKind::Links { page_index },
+        });
+    }
+
+    fn apply_search_results(&mut self) {
+        while let Ok(message) = self.search_result_rx.try_recv() {
+            match message {
+                SearchMessage::Progress { id, done, total } if id == self.search_job_id => {
+                    self.search_progress = (done, total)
+                }
+                SearchMessage::Finished {
+                    id,
+                    cancelled,
+                    result,
+                } if id == self.search_job_id => {
+                    self.search_running = false;
+                    if cancelled {
+                        self.status = "Search cancelled.".to_owned();
+                        continue;
+                    }
+                    match result {
+                        Ok(hits) => {
+                            self.status = if hits.is_empty() {
+                                "No matches found in selectable PDF text.".to_owned()
+                            } else if hits.len() == MAX_SEARCH_HITS {
+                                format!(
+                                    "Showing first {MAX_SEARCH_HITS} matches — refine your search."
+                                )
+                            } else {
+                                format!("{} search matches", hits.len())
+                            };
+                            self.search_hits = hits;
+                        }
+                        Err(err) => self.status = format!("Search failed: {err}"),
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn view_location(&self) -> ViewLocation {
+        ViewLocation {
+            page: self.project.selected_page,
+            zoom: self.zoom,
+            pan: self.pan,
+            fit_mode: self.fit_mode,
+        }
+    }
+
+    fn restore_view(&mut self, view: ViewLocation, ctx: &egui::Context) {
+        self.select_page_without_history(view.page, ctx);
+        self.zoom = view.zoom;
+        self.pan = view.pan;
+        self.fit_mode = view.fit_mode;
+        self.fitted_viewport = None;
+        self.fit_to_page_requested = false;
+        self.fit_to_width_requested = false;
+        self.mark_view_changed();
+        ctx.request_repaint();
+    }
+
+    fn go_back(&mut self, ctx: &egui::Context) {
+        if self.loading_document.is_some() {
+            return;
+        }
+        if let Some(view) = self.navigation_history.back(self.view_location()) {
+            self.restore_view(view, ctx);
+        }
+    }
+    fn go_forward(&mut self, ctx: &egui::Context) {
+        if self.loading_document.is_some() {
+            return;
+        }
+        if let Some(view) = self.navigation_history.forward(self.view_location()) {
+            self.restore_view(view, ctx);
+        }
+    }
+
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
-        if ctx.input(|input| input.modifiers.command && input.key_pressed(egui::Key::O)) {
+        if ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::O)) {
             self.choose_pdf(ctx);
+        }
+        if ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::F)) {
+            self.navigation_tab = NavigationTab::Search;
+            self.sidebar_collapsed = false;
+            self.search_focus_requested = true;
+        }
+        if ctx.input(|input| input.key_pressed(egui::Key::Escape)) && self.search_running {
+            self.cancel_search();
+            self.status = "Search cancelled.".to_owned();
+        }
+        if ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::Num1))
+            && self.loading_document.is_none()
+        {
+            self.fit_to_page_requested = true;
+            self.fit_to_width_requested = false;
+        }
+        if ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::Num2))
+            && self.loading_document.is_none()
+        {
+            self.fit_to_width_requested = true;
+            self.fit_to_page_requested = false;
+        }
+        if ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::Num0)) {
+            self.fit_to_width_requested = false;
+            self.fit_to_page_requested = false;
+            self.reset_view();
+        }
+        if ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::G))
+            && self.page_count().is_some_and(|count| count > 0)
+            && self.loading_document.is_none()
+        {
+            self.page_entry_focus_requested = true;
+        }
+        if self.search_focus_requested
+            || self.page_entry_focus_requested
+            || ctx.egui_wants_keyboard_input()
+        {
+            return;
+        }
+        let copy = ctx.input_mut(|input| {
+            let native_copy = input.events.iter().any(|e| matches!(e, egui::Event::Copy));
+            if native_copy {
+                input.events.retain(|e| !matches!(e, egui::Event::Copy));
+            }
+            native_copy || input.consume_key(egui::Modifiers::COMMAND, egui::Key::C)
+        });
+        if copy {
+            self.copy_pdf_selection(ctx);
+        }
+        if ctx.input_mut(|input| input.consume_key(egui::Modifiers::ALT, egui::Key::ArrowLeft)) {
+            self.go_back(ctx);
+            return;
+        }
+        if ctx.input_mut(|input| input.consume_key(egui::Modifiers::ALT, egui::Key::ArrowRight)) {
+            self.go_forward(ctx);
+            return;
         }
         if ctx.input(|input| {
             input.key_pressed(egui::Key::ArrowRight) || input.key_pressed(egui::Key::PageDown)
@@ -769,29 +1497,30 @@ impl GlyphApp {
         if ctx.input(|input| input.key_pressed(egui::Key::Home)) {
             self.select_page(0, ctx);
         }
-        if ctx.input(|input| input.key_pressed(egui::Key::End)) {
-            if let Some(page_count) = self.page_count() {
-                self.select_page(page_count.saturating_sub(1), ctx);
-            }
-        }
-        if ctx.input(|input| input.modifiers.command && input.key_pressed(egui::Key::Num0)) {
-            self.reset_view();
+        if ctx.input(|input| input.key_pressed(egui::Key::End))
+            && let Some(page_count) = self.page_count()
+        {
+            self.select_page(page_count.saturating_sub(1), ctx);
         }
     }
 }
 
-impl eframe::App for GlyphApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+impl GlyphApp {
+    fn draw(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
+        theme::refresh(&ctx);
         self.apply_render_results(&ctx);
+        self.apply_search_results();
+        self.apply_automation_results(&ctx);
+        self.automation_dialog(&ctx);
         self.handle_dropped_files(&ctx);
         self.handle_shortcuts(&ctx);
 
         egui::Panel::top("title_bar")
             .frame(
                 egui::Frame::new()
-                    .fill(theme::SURFACE)
-                    .stroke(egui::Stroke::new(1.0, theme::STROKE_STRONG))
+                    .fill(theme::color(theme::SURFACE))
+                    .stroke(egui::Stroke::new(1.0, theme::color(theme::STROKE_STRONG)))
                     .inner_margin(egui::Margin::symmetric(12, 8)),
             )
             .show(ui, |ui| {
@@ -801,14 +1530,14 @@ impl eframe::App for GlyphApp {
                             .monospace()
                             .strong()
                             .size(13.0)
-                            .color(theme::ACCENT_STRONG),
+                            .color(theme::color(theme::ACCENT_STRONG)),
                     );
                     ui.separator();
                     ui.label(
                         egui::RichText::new(self.window_title())
                             .monospace()
                             .size(13.0)
-                            .color(theme::TEXT),
+                            .color(theme::color(theme::TEXT)),
                     );
                     ui.add_space(12.0);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -830,8 +1559,8 @@ impl eframe::App for GlyphApp {
                 .size_range(46.0..=46.0)
                 .frame(
                     egui::Frame::new()
-                        .fill(theme::PANEL)
-                        .stroke(egui::Stroke::new(1.0, theme::STROKE_STRONG))
+                        .fill(theme::color(theme::PANEL))
+                        .stroke(egui::Stroke::new(1.0, theme::color(theme::STROKE_STRONG)))
                         .inner_margin(egui::Margin::symmetric(6, 12)),
                 )
                 .show(ui, |ui| {
@@ -844,7 +1573,7 @@ impl eframe::App for GlyphApp {
                             egui::RichText::new("NAV")
                                 .monospace()
                                 .size(10.0)
-                                .color(theme::TEXT_FAINT),
+                                .color(theme::color(theme::TEXT_FAINT)),
                         );
                     });
                 });
@@ -855,8 +1584,8 @@ impl eframe::App for GlyphApp {
                 .size_range(260.0..=420.0)
                 .frame(
                     egui::Frame::new()
-                        .fill(theme::PANEL)
-                        .stroke(egui::Stroke::new(1.0, theme::STROKE_STRONG))
+                        .fill(theme::color(theme::PANEL))
+                        .stroke(egui::Stroke::new(1.0, theme::color(theme::STROKE_STRONG)))
                         .inner_margin(egui::Margin::symmetric(10, 12)),
                 )
                 .show(ui, |ui| {
@@ -871,11 +1600,10 @@ impl eframe::App for GlyphApp {
                         if let Some(document) = &self.project.document {
                             let display_name = document.display_name();
                             let page_count = document.summary.page_count;
-                            let pages = document.summary.pages.clone();
-                            let bookmarks = document.summary.bookmarks.clone();
+                            let bookmark_rows = document.summary.bookmarks.len();
                             egui::Frame::new()
-                                .fill(theme::CARD)
-                                .stroke(egui::Stroke::new(1.0, theme::STROKE))
+                                .fill(theme::color(theme::CARD))
+                                .stroke(egui::Stroke::new(1.0, theme::color(theme::STROKE)))
                                 .corner_radius(egui::CornerRadius::same(4))
                                 .inner_margin(egui::Margin::symmetric(10, 8))
                                 .show(ui, |ui| {
@@ -885,14 +1613,14 @@ impl eframe::App for GlyphApp {
                                                 .monospace()
                                                 .strong()
                                                 .size(11.0)
-                                                .color(theme::ACCENT),
+                                                .color(theme::color(theme::ACCENT)),
                                         );
                                         ui.label(
                                             egui::RichText::new(display_name)
                                                 .monospace()
                                                 .size(13.0)
                                                 .strong()
-                                                .color(theme::TEXT),
+                                                .color(theme::color(theme::TEXT)),
                                         );
                                         ui.with_layout(
                                             egui::Layout::right_to_left(egui::Align::Center),
@@ -903,7 +1631,7 @@ impl eframe::App for GlyphApp {
                                                         page_count,
                                                     ))
                                                     .size(12.0)
-                                                    .color(theme::TEXT_MUTED),
+                                                    .color(theme::color(theme::TEXT_MUTED)),
                                                 );
                                             },
                                         );
@@ -915,7 +1643,7 @@ impl eframe::App for GlyphApp {
                                     .add_enabled(
                                         self.can_go_previous(),
                                         egui::Button::new("← Prev")
-                                            .fill(theme::CONTROL)
+                                            .fill(theme::color(theme::CONTROL))
                                             .corner_radius(4),
                                     )
                                     .clicked()
@@ -926,7 +1654,7 @@ impl eframe::App for GlyphApp {
                                     .add_enabled(
                                         self.can_go_next(),
                                         egui::Button::new("Next →")
-                                            .fill(theme::CONTROL)
+                                            .fill(theme::color(theme::CONTROL))
                                             .corner_radius(4),
                                     )
                                     .clicked()
@@ -956,53 +1684,63 @@ impl eframe::App for GlyphApp {
                                     self.navigation_tab = NavigationTab::Bookmarks;
                                 }
                             });
+                            if nav_tab_button(
+                                ui,
+                                "Search",
+                                self.navigation_tab == NavigationTab::Search,
+                            )
+                            .clicked()
+                            {
+                                self.navigation_tab = NavigationTab::Search;
+                                self.search_focus_requested = true;
+                            }
                             ui.add_space(8.0);
 
                             match self.navigation_tab {
-                                NavigationTab::Pages => {
-                                    egui::ScrollArea::vertical().show(ui, |ui| {
-                                        for page in pages {
-                                            let is_selected =
-                                                self.project.selected_page == page.index;
-                                            let title = page.label.as_deref().unwrap_or("Page");
-                                            let label = format!("{:>3}   {title}", page.index + 1);
-                                            if page_row(ui, &label, is_selected).clicked() {
-                                                self.select_page(page.index, &ctx);
-                                            }
-                                        }
-                                    });
-                                }
+                                NavigationTab::Search => self.search_sidebar(ui, &ctx),
+                                NavigationTab::Pages => self.thumbnail_sidebar(ui),
                                 NavigationTab::Bookmarks => {
-                                    if bookmarks.is_empty() {
+                                    if bookmark_rows == 0 {
                                         empty_sidebar_note(ui, "No bookmarks in this PDF.");
                                     } else {
-                                        egui::ScrollArea::vertical().show(ui, |ui| {
-                                            for bookmark in bookmarks {
-                                                let is_selected =
-                                                    bookmark.page_index.is_some_and(|page| {
-                                                        page == self.project.selected_page
-                                                    });
-                                                let response = bookmark_row(
-                                                    ui,
-                                                    &bookmark.title,
-                                                    bookmark.depth,
-                                                    bookmark.page_index,
-                                                    is_selected,
-                                                );
-                                                if response.clicked() {
-                                                    if let Some(page_index) = bookmark.page_index {
+                                        egui::ScrollArea::vertical()
+                                            .id_salt("bookmarks")
+                                            .show_rows(ui, 28.0, bookmark_rows, |ui, rows| {
+                                                for index in rows {
+                                                    let bookmark = self
+                                                        .project
+                                                        .document
+                                                        .as_ref()
+                                                        .unwrap()
+                                                        .summary
+                                                        .bookmarks[index]
+                                                        .clone();
+                                                    let is_selected =
+                                                        bookmark.page_index.is_some_and(|page| {
+                                                            page == self.project.selected_page
+                                                        });
+                                                    let response = bookmark_row(
+                                                        ui,
+                                                        &bookmark.title,
+                                                        bookmark.depth,
+                                                        bookmark.page_index,
+                                                        is_selected,
+                                                    );
+                                                    if response.clicked()
+                                                        && let Some(page_index) =
+                                                            bookmark.page_index
+                                                    {
                                                         self.select_page(page_index, &ctx);
                                                     }
                                                 }
-                                            }
-                                        });
+                                            });
                                     }
                                 }
                             }
                         } else {
                             egui::Frame::new()
-                                .fill(theme::CARD)
-                                .stroke(egui::Stroke::new(1.0, theme::STROKE))
+                                .fill(theme::color(theme::CARD))
+                                .stroke(egui::Stroke::new(1.0, theme::color(theme::STROKE)))
                                 .corner_radius(egui::CornerRadius::same(4))
                                 .inner_margin(egui::Margin::same(14))
                                 .show(ui, |ui| {
@@ -1011,13 +1749,13 @@ impl eframe::App for GlyphApp {
                                             egui::RichText::new("No PDF loaded")
                                                 .size(16.0)
                                                 .strong()
-                                                .color(theme::TEXT),
+                                                .color(theme::color(theme::TEXT)),
                                         );
                                     });
                                     ui.add_space(4.0);
                                     ui.label(
                                         egui::RichText::new("Drop a PDF here or press Ctrl+O.")
-                                            .color(theme::TEXT_MUTED),
+                                            .color(theme::color(theme::TEXT_MUTED)),
                                     );
                                 });
                         }
@@ -1028,20 +1766,20 @@ impl eframe::App for GlyphApp {
         egui::Panel::bottom("status_bar")
             .frame(
                 egui::Frame::new()
-                    .fill(theme::PANEL)
-                    .stroke(egui::Stroke::new(1.0, theme::STROKE_STRONG))
+                    .fill(theme::color(theme::PANEL))
+                    .stroke(egui::Stroke::new(1.0, theme::color(theme::STROKE_STRONG)))
                     .inner_margin(egui::Margin::symmetric(12, 6)),
             )
             .show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
-                    ui.label(egui::RichText::new("▣").color(theme::ACCENT));
-                    ui.label(egui::RichText::new(&self.status).color(theme::TEXT_MUTED));
+                    ui.label(egui::RichText::new("▣").color(theme::color(theme::ACCENT)));
+                    ui.label(egui::RichText::new(&self.status).color(theme::color(theme::TEXT_MUTED)));
                     ui.separator();
                     ui.label(
                         egui::RichText::new(
-                            "Ctrl+O file picker · ←/→ sheets · middle-button drag pans · scroll zoom",
+                            "Ctrl+O open · Ctrl+F search · Alt+←/→ history · middle drag pans · scroll zoom",
                         )
-                        .color(theme::TEXT_MUTED),
+                        .color(theme::color(theme::TEXT_MUTED)),
                     );
                 });
             });
@@ -1049,63 +1787,70 @@ impl eframe::App for GlyphApp {
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::new()
-                    .fill(theme::CANVAS)
+                    .fill(theme::color(theme::CANVAS))
                     .inner_margin(egui::Margin::same(14)),
             )
             .show(ui, |ui| {
                 egui::Frame::new()
-                    .fill(theme::PANEL)
-                    .stroke(egui::Stroke::new(1.0, theme::STROKE))
+                    .fill(theme::color(theme::PANEL))
+                    .stroke(egui::Stroke::new(1.0, theme::color(theme::STROKE)))
                     .corner_radius(egui::CornerRadius::same(4))
                     .inner_margin(egui::Margin::symmetric(8, 6))
                     .show(ui, |ui| {
-                        ui.horizontal(|ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            if ui.add_enabled(self.navigation_history.can_back(), egui::Button::new("Back")).on_hover_text("Alt+Left").clicked() { self.go_back(&ctx); }
+                            if ui.add_enabled(self.navigation_history.can_forward(), egui::Button::new("Forward")).on_hover_text("Alt+Right").clicked() { self.go_forward(&ctx); }
                             if tool_chip(ui, "−").clicked() {
                                 self.zoom = (self.zoom * 0.9).max(MIN_ZOOM);
-                                self.mark_view_changed();
+                                self.manual_view_changed();
                                 ctx.request_repaint();
                             }
                             metric_pill(ui, &format_zoom_label(self.zoom));
                             if tool_chip(ui, "+").clicked() {
                                 self.zoom = (self.zoom * 1.1).min(MAX_ZOOM);
-                                self.mark_view_changed();
+                                self.manual_view_changed();
                                 ctx.request_repaint();
                             }
+                            self.draw_page_entry(ui);
                             ui.add_space(8.0);
-                            if tool_chip(ui, "Fit page").clicked() {
+                            if ui.add_enabled_ui(self.loading_document.is_none(), |ui| tool_chip(ui, "Fit page")).inner.on_disabled_hover_text("Available after the document finishes loading.").on_hover_text("Ctrl+1").clicked() {
                                 self.fit_to_page_requested = true;
+                                self.fit_to_width_requested = false;
+                            }
+                            if ui.add_enabled_ui(self.loading_document.is_none(), |ui| tool_chip(ui, "Fit width")).inner.on_disabled_hover_text("Available after the document finishes loading.").on_hover_text("Ctrl+2").clicked() {
+                                self.fit_to_width_requested = true;
+                                self.fit_to_page_requested = false;
                             }
                             if tool_chip(ui, "Reset").clicked() {
                                 self.reset_view();
                             }
                             ui.add_space(12.0);
-                            if tool_chip(ui, "Auto bookmarks").clicked() {
+                            if tool_chip(ui, "Auto bookmarks").on_hover_text("Saves a new copy and replaces its existing bookmark hierarchy with detected sheet numbers. The original PDF is unchanged.").clicked() {
                                 self.generate_bookmarks_for_current_pdf(&ctx);
                             }
                             if tool_chip(ui, "Hyperlinks").clicked() {
                                 self.generate_hyperlinks_for_current_pdf(&ctx);
                             }
-                            if tool_chip(ui, "Flatten").clicked() {
-                                self.flatten_current_pdf(&ctx);
-                            }
+                            ui.add_enabled(false, egui::Button::new("Flatten"))
+                                .on_disabled_hover_text("Temporarily disabled: appearance-preserving, reversible flattening is not implemented yet.");
+                            ui.checkbox(&mut self.show_link_highlights, "Show links");
                         });
                     });
                 ui.add_space(12.0);
+                if let Some(error)=&self.text_error {ui.label(egui::RichText::new("Text selection unavailable").color(theme::color(theme::TEXT_MUTED))).on_hover_text(error);}
 
                 let available = ui.available_size();
-                let (rect, response) = ui.allocate_exact_size(available, egui::Sense::drag());
-                if self.fit_to_page_requested {
-                    self.fit_page_to_rect(rect);
-                    self.fit_to_page_requested = false;
-                }
+                let (rect, response) = ui.allocate_exact_size(available, egui::Sense::click_and_drag());
+                self.apply_view_fit(rect);
+                self.interact_with_page_text(ui,&response,rect);
                 let pointer_delta = ui.input(|i| i.pointer.delta());
                 let middle_pan = response.hovered()
                     && ui.input(|i| i.pointer.button_down(egui::PointerButton::Middle))
                     && pointer_delta != egui::Vec2::ZERO;
-                let primary_pan = response.dragged_by(egui::PointerButton::Primary);
+                let primary_pan = response.dragged_by(egui::PointerButton::Primary) && !self.selecting_text;
                 if middle_pan || primary_pan {
                     self.pan += pointer_delta;
-                    self.mark_view_changed();
+                    self.manual_view_changed();
                     ctx.request_repaint();
                 }
                 if let Some(pointer) = response.hover_pos() {
@@ -1122,15 +1867,16 @@ impl eframe::App for GlyphApp {
                     if (pinch_scale - 1.0).abs() > f32::EPSILON {
                         (self.zoom, self.pan) =
                             zoom_around_pointer(self.zoom, self.pan, pinch_scale, pointer, rect);
-                        self.mark_view_changed();
+                        self.manual_view_changed();
                         ctx.request_repaint();
                     } else {
                         let scroll_y = ui.input(|i| i.smooth_scroll_delta.y);
                         if scroll_y.abs() > 0.0 {
-                            let scale = if scroll_y > 0.0 { 1.08 } else { 0.92 };
+                            // Integrate scroll distance, not the number of smoothing frames.
+                            let scale = (scroll_y * 0.002).exp();
                             (self.zoom, self.pan) =
                                 zoom_around_pointer(self.zoom, self.pan, scale, pointer, rect);
-                            self.mark_view_changed();
+                            self.manual_view_changed();
                             ctx.request_repaint();
                         }
                     }
@@ -1164,19 +1910,31 @@ impl eframe::App for GlyphApp {
                         egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
                         egui::Color32::WHITE,
                     );
-                    if let (Some(tile), Some(tile_texture)) =
-                        (&self.rendered_tile, &self.tile_texture)
-                    {
-                        if tile.page_index == page_index {
-                            let tile_rect = tile_screen_rect(tile, page_rect);
-                            painter.image(
-                                tile_texture.id(),
-                                tile_rect,
-                                egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
-                                egui::Color32::WHITE,
-                            );
+                    if let (Some(tile), Some(tile_texture)) = (&self.rendered_tile, &self.tile_texture) && tile.page_index == page_index {
+                        let tile_rect = tile_screen_rect(tile, page_rect);
+                        painter.image(tile_texture.id(),tile_rect,egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),egui::Color32::WHITE);
+                    }
+                    self.paint_text_selection(&painter,page_rect,rect);
+                    let mut link_target = None;
+                    for link in &self.page_links {
+                        let link_rect = overlay_screen_rect(link.rect, page_rect);
+                        let hovered = response.hover_pos().is_some_and(|pos| link_rect.contains(pos));
+                        if self.show_link_highlights || hovered {
+                            painter.rect_filled(link_rect, 0.0, theme::translucent(theme::color(theme::ACCENT), if hovered { 70 } else { 30 }));
+                            painter.rect_stroke(link_rect, 0.0, egui::Stroke::new(1.0, theme::color(theme::ACCENT)), egui::StrokeKind::Inside);
+                        }
+                        if hovered {
+                            ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+                            if response.clicked() { link_target = Some(link.target_page); }
                         }
                     }
+                    for (index, hit) in self.search_hits.iter().enumerate().filter(|(_, hit)| hit.page_index == page_index) {
+                        for bounds in &hit.rects {
+                            let hit_rect = overlay_screen_rect(*bounds, page_rect);
+                            painter.rect_filled(hit_rect, 0.0, egui::Color32::from_rgba_unmultiplied(255, 205, 40, if self.selected_search_hit == Some(index) { 130 } else { 65 }));
+                        }
+                    }
+                    if let Some(target) = link_target { self.select_page(target, &ctx); }
                     painter.rect_stroke(
                         page_rect,
                         1.0,
@@ -1188,6 +1946,25 @@ impl eframe::App for GlyphApp {
                 }
             });
     }
+}
+
+impl eframe::App for GlyphApp {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.draw(ui);
+    }
+}
+
+fn overlay_screen_rect(rect: crate::core::links::PdfRect, page: egui::Rect) -> egui::Rect {
+    egui::Rect::from_min_max(
+        egui::pos2(
+            page.left() + rect.x * page.width(),
+            page.top() + rect.y * page.height(),
+        ),
+        egui::pos2(
+            page.left() + (rect.x + rect.width) * page.width(),
+            page.top() + (rect.y + rect.height) * page.height(),
+        ),
+    )
 }
 
 fn display_name(path: &Path) -> String {
@@ -1317,30 +2094,13 @@ fn sibling_pdf_path(path: &Path, suffix: &str) -> PathBuf {
     path.with_file_name(format!("{stem}.glyph-{suffix}.pdf"))
 }
 
-fn bookmark_candidates_from_pages(pages: &[crate::pdf::PdfPageInfo]) -> Vec<SheetCandidate> {
-    pages
-        .iter()
-        .filter_map(|page| {
-            let label = page.label.as_deref()?;
-            let id = normalize_sheet_id(label)
-                .unwrap_or_else(|| SheetId(format!("P{}", page.index + 1)));
-            Some(SheetCandidate {
-                id,
-                title: Some(label.to_owned()),
-                page_index: page.index,
-                confidence: 50,
-            })
-        })
-        .collect()
-}
-
 fn format_page_counter(selected_page: usize, page_count: usize) -> String {
     format!("Page {} / {}", selected_page + 1, page_count)
 }
 
 fn draw_canvas_backdrop(painter: &egui::Painter, rect: egui::Rect) {
-    painter.rect_filled(rect, 6.0, theme::CANVAS);
-    let grid_color = theme::translucent(theme::STROKE_STRONG, 42);
+    painter.rect_filled(rect, 6.0, theme::color(theme::CANVAS));
+    let grid_color = theme::translucent(theme::color(theme::STROKE_STRONG), 42);
     let step = 36.0;
     let mut x = rect.left() + step;
     while x < rect.right() {
@@ -1361,18 +2121,22 @@ fn draw_canvas_backdrop(painter: &egui::Painter, rect: egui::Rect) {
     painter.rect_stroke(
         rect,
         6.0,
-        egui::Stroke::new(1.0, theme::STROKE_STRONG),
+        egui::Stroke::new(1.0, theme::color(theme::STROKE_STRONG)),
         egui::StrokeKind::Inside,
     );
 }
 
 fn tool_chip(ui: &mut egui::Ui, label: &str) -> egui::Response {
     ui.add(
-        egui::Button::new(egui::RichText::new(label).color(theme::TEXT).size(12.0))
-            .fill(theme::PANEL_RAISED)
-            .stroke(egui::Stroke::new(1.0, theme::STROKE))
-            .corner_radius(egui::CornerRadius::same(4))
-            .min_size(egui::vec2(36.0, 26.0)),
+        egui::Button::new(
+            egui::RichText::new(label)
+                .color(theme::color(theme::TEXT))
+                .size(12.0),
+        )
+        .fill(theme::color(theme::PANEL_RAISED))
+        .stroke(egui::Stroke::new(1.0, theme::color(theme::STROKE)))
+        .corner_radius(egui::CornerRadius::same(4))
+        .min_size(egui::vec2(36.0, 26.0)),
     )
 }
 
@@ -1381,11 +2145,11 @@ fn sidebar_toggle_button(ui: &mut egui::Ui, label: &str, tooltip: &str) -> egui:
         egui::Button::new(
             egui::RichText::new(label)
                 .strong()
-                .color(theme::ACCENT)
+                .color(theme::color(theme::ACCENT))
                 .size(14.0),
         )
-        .fill(theme::CONTROL)
-        .stroke(egui::Stroke::new(1.0, theme::STROKE))
+        .fill(theme::color(theme::CONTROL))
+        .stroke(egui::Stroke::new(1.0, theme::color(theme::STROKE)))
         .corner_radius(egui::CornerRadius::same(4))
         .min_size(egui::vec2(28.0, 26.0)),
     )
@@ -1398,10 +2162,10 @@ fn sidebar_wide_toggle_button(ui: &mut egui::Ui, label: &str, tooltip: &str) -> 
             egui::RichText::new(label)
                 .monospace()
                 .strong()
-                .color(theme::ACCENT),
+                .color(theme::color(theme::ACCENT)),
         )
-        .fill(theme::CONTROL)
-        .stroke(egui::Stroke::new(1.0, theme::STROKE))
+        .fill(theme::color(theme::CONTROL))
+        .stroke(egui::Stroke::new(1.0, theme::color(theme::STROKE)))
         .corner_radius(egui::CornerRadius::same(4))
         .min_size(egui::vec2(ui.available_width(), 28.0)),
     )
@@ -1410,29 +2174,29 @@ fn sidebar_wide_toggle_button(ui: &mut egui::Ui, label: &str, tooltip: &str) -> 
 
 fn metric_pill(ui: &mut egui::Ui, label: &str) {
     egui::Frame::new()
-        .fill(theme::PANEL_RAISED)
-        .stroke(egui::Stroke::new(1.0, theme::STROKE))
+        .fill(theme::color(theme::PANEL_RAISED))
+        .stroke(egui::Stroke::new(1.0, theme::color(theme::STROKE)))
         .corner_radius(egui::CornerRadius::same(4))
         .inner_margin(egui::Margin::symmetric(10, 5))
         .show(ui, |ui| {
             ui.label(
                 egui::RichText::new(label)
                     .size(12.0)
-                    .color(theme::TEXT_MUTED),
+                    .color(theme::color(theme::TEXT_MUTED)),
             );
         });
 }
 
 fn nav_tab_button(ui: &mut egui::Ui, label: &str, selected: bool) -> egui::Response {
     let fill = if selected {
-        theme::ACCENT_SOFT
+        theme::color(theme::ACCENT_SOFT)
     } else {
-        theme::PANEL_RAISED
+        theme::color(theme::PANEL_RAISED)
     };
     let text = if selected {
-        theme::ACCENT_STRONG
+        theme::color(theme::ACCENT_STRONG)
     } else {
-        theme::TEXT_MUTED
+        theme::color(theme::TEXT_MUTED)
     };
     ui.add(
         egui::Button::new(egui::RichText::new(label).strong().color(text).size(12.0))
@@ -1441,9 +2205,9 @@ fn nav_tab_button(ui: &mut egui::Ui, label: &str, selected: bool) -> egui::Respo
             .stroke(egui::Stroke::new(
                 1.0,
                 if selected {
-                    theme::ACCENT
+                    theme::color(theme::ACCENT)
                 } else {
-                    theme::STROKE
+                    theme::color(theme::STROKE)
                 },
             ))
             .corner_radius(egui::CornerRadius::same(4))
@@ -1456,21 +2220,21 @@ fn section_header(ui: &mut egui::Ui, label: &str) {
         egui::RichText::new(label.to_uppercase())
             .size(11.0)
             .strong()
-            .color(theme::TEXT_MUTED),
+            .color(theme::color(theme::TEXT_MUTED)),
     );
     ui.add_space(4.0);
 }
 
 fn page_row(ui: &mut egui::Ui, label: &str, selected: bool) -> egui::Response {
     let fill = if selected {
-        theme::ACCENT_SOFT
+        theme::color(theme::ACCENT_SOFT)
     } else {
-        theme::PANEL_RAISED
+        theme::color(theme::PANEL_RAISED)
     };
     let text = if selected {
-        theme::ACCENT_STRONG
+        theme::color(theme::ACCENT_STRONG)
     } else {
-        theme::TEXT
+        theme::color(theme::TEXT)
     };
     ui.add(
         egui::Button::new(
@@ -1484,9 +2248,9 @@ fn page_row(ui: &mut egui::Ui, label: &str, selected: bool) -> egui::Response {
         .stroke(egui::Stroke::new(
             1.0,
             if selected {
-                theme::ACCENT
+                theme::color(theme::ACCENT)
             } else {
-                theme::STROKE
+                theme::color(theme::STROKE)
             },
         ))
         .corner_radius(egui::CornerRadius::same(4))
@@ -1502,16 +2266,16 @@ fn bookmark_row(
     selected: bool,
 ) -> egui::Response {
     let fill = if selected {
-        theme::ACCENT_SOFT
+        theme::color(theme::ACCENT_SOFT)
     } else {
-        theme::PANEL_RAISED
+        theme::color(theme::PANEL_RAISED)
     };
     let text = if selected {
-        theme::ACCENT_STRONG
+        theme::color(theme::ACCENT_STRONG)
     } else if page_index.is_some() {
-        theme::TEXT
+        theme::color(theme::TEXT)
     } else {
-        theme::TEXT_MUTED
+        theme::color(theme::TEXT_MUTED)
     };
     let label = format_bookmark_label(title, depth, page_index);
     ui.add_enabled(
@@ -1522,9 +2286,9 @@ fn bookmark_row(
             .stroke(egui::Stroke::new(
                 1.0,
                 if selected {
-                    theme::ACCENT
+                    theme::color(theme::ACCENT)
                 } else {
-                    theme::STROKE
+                    theme::color(theme::STROKE)
                 },
             ))
             .corner_radius(egui::CornerRadius::same(4))
@@ -1541,14 +2305,14 @@ fn format_bookmark_label(title: &str, depth: usize, page_index: Option<usize>) -
 
 fn empty_sidebar_note(ui: &mut egui::Ui, note: &str) {
     egui::Frame::new()
-        .fill(theme::SURFACE)
-        .stroke(egui::Stroke::new(1.0, theme::STROKE))
+        .fill(theme::color(theme::SURFACE))
+        .stroke(egui::Stroke::new(1.0, theme::color(theme::STROKE)))
         .corner_radius(egui::CornerRadius::same(4))
         .inner_margin(egui::Margin::same(12))
         .show(ui, |ui| {
             ui.label(
                 egui::RichText::new(note)
-                    .color(theme::TEXT_MUTED)
+                    .color(theme::color(theme::TEXT_MUTED))
                     .size(12.0),
             );
         });
@@ -1557,37 +2321,449 @@ fn empty_sidebar_note(ui: &mut egui::Ui, note: &str) {
 fn draw_empty_state(ui: &mut egui::Ui, rect: egui::Rect) {
     let painter = ui.painter_at(rect);
     let panel = egui::Rect::from_center_size(rect.center(), egui::vec2(420.0, 150.0));
-    painter.rect_filled(panel, 6.0, theme::PANEL);
+    painter.rect_filled(panel, 6.0, theme::color(theme::PANEL));
     painter.rect_stroke(
         panel,
         6.0,
-        egui::Stroke::new(1.0, theme::STROKE),
+        egui::Stroke::new(1.0, theme::color(theme::STROKE)),
         egui::StrokeKind::Inside,
     );
     painter.rect_filled(
         egui::Rect::from_min_size(panel.min, egui::vec2(4.0, panel.height())),
         0.0,
-        theme::ACCENT,
+        theme::color(theme::ACCENT),
     );
     painter.text(
         panel.center_top() + egui::vec2(0.0, 42.0),
         egui::Align2::CENTER_CENTER,
         "Drop a PDF",
         egui::FontId::proportional(20.0),
-        theme::TEXT,
+        theme::color(theme::TEXT),
     );
     painter.text(
         panel.center_top() + egui::vec2(0.0, 72.0),
         egui::Align2::CENTER_CENTER,
         "Drag a file here or press Ctrl+O.",
         egui::FontId::proportional(13.0),
-        theme::TEXT_MUTED,
+        theme::color(theme::TEXT_MUTED),
     );
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "manual full UI performance measurement"]
+    fn benchmark_large_document_sidebar() {
+        let ctx = egui::Context::default();
+        let mut app = GlyphApp::with_context(&ctx, None);
+        app.project.open_document(
+            "benchmark.pdf".into(),
+            crate::pdf::PdfDocumentSummary {
+                page_count: 10000,
+                pages: (0..10000)
+                    .map(|index| crate::pdf::PdfPageInfo {
+                        index,
+                        label: Some(format!("Sheet {index}")),
+                    })
+                    .collect(),
+                bookmarks: Vec::new(),
+                title: None,
+            },
+        );
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1440., 920.),
+            )),
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input.clone(), |ui| app.draw(ui));
+        output.textures_delta.clear();
+        let start = Instant::now();
+        for _ in 0..20 {
+            let mut output = ctx.run_ui(input.clone(), |ui| app.draw(ui));
+            output.textures_delta.clear();
+        }
+        println!("sidebar_10000_pages_20_frames={:?}", start.elapsed());
+    }
+
+    #[test]
+    fn same_path_stale_generation_links_are_rejected() {
+        let ctx = egui::Context::default();
+        let mut app = GlyphApp::with_context(&ctx, None);
+        app.project.open_document(
+            "test.pdf".into(),
+            crate::pdf::PdfDocumentSummary {
+                page_count: 1,
+                pages: vec![],
+                bookmarks: vec![],
+                title: None,
+            },
+        );
+        app.document_generation = 2;
+        app.pending_links = Some((1, 0));
+        let (tx, rx) = mpsc::channel();
+        app.render_result_rx = rx;
+        let link = PdfInternalLink {
+            rect: crate::core::links::PdfRect {
+                x: 0.1,
+                y: 0.2,
+                width: 0.3,
+                height: 0.4,
+            },
+            target_page: 0,
+        };
+        tx.send(RenderJobResult::Links {
+            id: 1,
+            generation: 1,
+            path: "test.pdf".into(),
+            page_index: 0,
+            result: Ok(vec![link.clone()]),
+        })
+        .unwrap();
+        app.apply_render_results(&ctx);
+        assert!(app.page_links.is_empty());
+        assert!(app.link_cache.is_empty());
+        app.pending_links = Some((2, 0));
+        tx.send(RenderJobResult::Links {
+            id: 2,
+            generation: 2,
+            path: "test.pdf".into(),
+            page_index: 0,
+            result: Ok(vec![link.clone()]),
+        })
+        .unwrap();
+        app.apply_render_results(&ctx);
+        assert_eq!(app.page_links, vec![link]);
+        let next = app.next_render_job_id;
+        app.queue_page_links(&ctx);
+        assert_eq!(
+            app.next_render_job_id, next,
+            "cache hit must not submit work"
+        );
+    }
+
+    #[test]
+    fn link_cache_is_bounded_and_generation_keyed() {
+        let mut app = GlyphApp::with_context(&egui::Context::default(), None);
+        for page in 0..100 {
+            app.cache_links(1, page, vec![]);
+            assert!(app.link_cache.len() <= 7);
+        }
+        assert_eq!(app.link_cache.len(), 7);
+        assert!(!app.link_cache.contains_key(&(2, 99)));
+        assert!(app.link_cache.contains_key(&(1, 99)));
+    }
+
+    #[test]
+    fn page_submission_clears_cancelled_pending_tile() {
+        let ctx = egui::Context::default();
+        let mut app = GlyphApp::with_context(&ctx, None);
+        app.project.open_document(
+            "test.pdf".into(),
+            crate::pdf::PdfDocumentSummary {
+                page_count: 1,
+                pages: vec![],
+                bookmarks: vec![],
+                title: None,
+            },
+        );
+        app.zoom = 3.;
+        app.page_aspect_ratio = Some(1.);
+        let viewport = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(500., 500.));
+        let page_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1500., 1500.));
+        app.ensure_visible_tile(&ctx, viewport, page_rect);
+        let cancelled = app.pending_tile_render.clone().unwrap();
+        app.queue_page_render("test.pdf".into(), 0, 1800);
+        assert!(app.pending_tile_render.is_none());
+        app.ensure_visible_tile(&ctx, viewport, page_rect);
+        let resubmitted = app.pending_tile_render.as_ref().unwrap();
+        assert_eq!(resubmitted.request, cancelled.request);
+        assert_ne!(resubmitted.id, cancelled.id);
+    }
+
+    #[test]
+    fn sheet_navigation_preserves_zoom_and_pan() {
+        let ctx = egui::Context::default();
+        let mut app = GlyphApp::with_context(&ctx, None);
+        app.project.open_document(
+            "test.pdf".into(),
+            crate::pdf::PdfDocumentSummary {
+                page_count: 3,
+                pages: Vec::new(),
+                bookmarks: Vec::new(),
+                title: None,
+            },
+        );
+        app.zoom = 2.5;
+        app.pan = egui::vec2(40., -20.);
+        app.select_page(1, &ctx);
+        assert_eq!(app.zoom, 2.5);
+        assert_eq!(app.pan, egui::vec2(40., -20.));
+    }
+    #[test]
+    fn stale_document_inspection_cannot_replace_latest_request() {
+        let ctx = egui::Context::default();
+        let mut app = GlyphApp::with_context(&ctx, None);
+        app.loading_document = Some(2);
+        let summary = crate::pdf::PdfDocumentSummary {
+            page_count: 0,
+            pages: Vec::new(),
+            bookmarks: Vec::new(),
+            title: None,
+        };
+        app.apply_inspection(1, "obsolete.pdf".into(), Ok(summary), &ctx);
+        assert!(app.project.document.is_none());
+        assert_eq!(app.loading_document, Some(2));
+    }
+
+    #[test]
+    fn page_cache_obeys_raster_and_gpu_memory_budget() {
+        let mut app = GlyphApp::with_context(&egui::Context::default(), None);
+        for index in 0..7 {
+            app.cache_rendered_page(
+                RenderedPage {
+                    page_index: index,
+                    width: 1800,
+                    height: 2400,
+                    rgba: vec![255; 1800 * 2400 * 4],
+                }
+                .into(),
+            );
+        }
+        assert!(
+            app.page_cache
+                .values()
+                .map(|p| p.rgba.len() * 2)
+                .sum::<usize>()
+                <= PAGE_CACHE_BYTE_BUDGET
+        );
+        assert_eq!(app.page_cache.len(), app.page_cache_order.len());
+    }
+
+    #[test]
+    fn stale_automation_output_does_not_replace_current_or_loading_document() {
+        let ctx = egui::Context::default();
+        for (generation, loading) in [(1, None), (0, Some(77))] {
+            let mut app = GlyphApp::with_context(&ctx, None);
+            app.project.open_document(
+                "current.pdf".into(),
+                crate::pdf::PdfDocumentSummary {
+                    page_count: 1,
+                    pages: Vec::new(),
+                    bookmarks: Vec::new(),
+                    title: None,
+                },
+            );
+            app.document_generation = generation;
+            app.loading_document = loading;
+            app.status = "Current document status".into();
+            let (tx, rx) = mpsc::channel();
+            app.automation_rx = Some((0, "current.pdf".into(), rx));
+            tx.send(Ok(AutomationOutcome {
+                kind: AutomationKind::Bookmarks,
+                message: "Saved bookmarks".into(),
+                output: Some("export.pdf".into()),
+            }))
+            .unwrap();
+            app.apply_automation_results(&ctx);
+            assert_eq!(
+                app.project.document.as_ref().unwrap().path,
+                PathBuf::from("current.pdf")
+            );
+            assert_eq!(app.loading_document, loading);
+            assert_eq!(app.status, "Current document status");
+            let feedback = app.automation_feedback.as_ref().unwrap();
+            assert!(feedback.message.contains("current.pdf"));
+            assert!(!feedback.busy);
+            assert_eq!(feedback.output.as_deref(), Some(Path::new("export.pdf")));
+        }
+    }
+
+    #[test]
+    fn current_bookmark_completion_queues_saved_copy_and_selects_bookmark_tab() {
+        let ctx = egui::Context::default();
+        let mut app = GlyphApp::with_context(&ctx, None);
+        app.project.open_document(
+            "current.pdf".into(),
+            crate::pdf::PdfDocumentSummary {
+                page_count: 1,
+                pages: Vec::new(),
+                bookmarks: Vec::new(),
+                title: None,
+            },
+        );
+        let (tx, rx) = mpsc::channel();
+        app.automation_rx = Some((app.document_generation, "current.pdf".into(), rx));
+        tx.send(Ok(AutomationOutcome {
+            kind: AutomationKind::Bookmarks,
+            message: "Saved bookmarks".into(),
+            output: Some("export.pdf".into()),
+        }))
+        .unwrap();
+        app.apply_automation_results(&ctx);
+        assert!(app.loading_document.is_some());
+        assert_eq!(app.navigation_tab, NavigationTab::Bookmarks);
+        assert!(!app.automation_feedback.as_ref().unwrap().busy);
+    }
+
+    #[test]
+    fn automation_completion_remains_visible_after_render_status_changes() {
+        let ctx = egui::Context::default();
+        let mut app = GlyphApp::with_context(&ctx, None);
+        app.project.open_document(
+            "fixture.pdf".into(),
+            crate::pdf::PdfDocumentSummary {
+                page_count: 1,
+                pages: Vec::new(),
+                bookmarks: Vec::new(),
+                title: None,
+            },
+        );
+        let (tx, rx) = mpsc::channel();
+        app.automation_rx = Some((app.document_generation, "fixture.pdf".into(), rx));
+        tx.send(Ok(automation::AutomationOutcome {
+            kind: AutomationKind::Hyperlinks,
+            message: "No cross-sheet targets: this PDF contains one sheet.".into(),
+            output: None,
+        }))
+        .unwrap();
+        app.apply_automation_results(&ctx);
+        app.status = "Rendered high-res viewport tile".into();
+        let feedback = app.automation_feedback.as_ref().unwrap();
+        assert!(!feedback.busy);
+        assert!(feedback.message.contains("one sheet"));
+        assert_eq!(
+            app.project.document.as_ref().unwrap().path,
+            PathBuf::from("fixture.pdf")
+        );
+    }
+
+    #[test]
+    fn cached_page_shares_raster_storage_instead_of_copying_it() {
+        let mut app = GlyphApp::with_context(&egui::Context::default(), None);
+        app.cache_rendered_page(
+            RenderedPage {
+                page_index: 0,
+                width: 2,
+                height: 2,
+                rgba: vec![255; 16],
+            }
+            .into(),
+        );
+        let first = app.cached_page(0, 2).unwrap();
+        let second = app.cached_page(0, 2).unwrap();
+        assert_eq!(first.rgba.as_ptr(), second.rgba.as_ptr());
+    }
+
+    #[test]
+    fn page_cache_never_retains_untracked_pinned_pages() {
+        let mut app = GlyphApp::with_context(&egui::Context::default(), None);
+        for index in 0usize..32 {
+            app.project.selected_page = index.saturating_sub(PAGE_CACHE_LIMIT);
+            app.cache_rendered_page(
+                RenderedPage {
+                    page_index: index,
+                    width: 2,
+                    height: 2,
+                    rgba: vec![255; 16],
+                }
+                .into(),
+            );
+        }
+        assert!(app.page_cache.len() <= PAGE_CACHE_LIMIT);
+        assert_eq!(app.page_cache.len(), app.page_cache_order.len());
+    }
+
+    #[test]
+    fn navigating_to_a_cached_page_reuses_its_texture() {
+        let ctx = egui::Context::default();
+        let mut app = GlyphApp::with_context(&ctx, None);
+        let page = RenderedPage {
+            page_index: 0,
+            width: 2,
+            height: 2,
+            rgba: vec![255; 16],
+        };
+        app.cache_rendered_page(page.clone().into());
+        app.install_texture(&ctx, page.into());
+        let texture = app.page_texture.as_ref().unwrap().id();
+        app.install_texture(&ctx, app.cached_page(0, 2).unwrap());
+        assert_eq!(app.page_texture.as_ref().unwrap().id(), texture);
+    }
+
+    #[test]
+    #[ignore = "manual cache performance measurement"]
+    fn benchmark_cache_lookup() {
+        let mut app = GlyphApp::with_context(&egui::Context::default(), None);
+        app.cache_rendered_page(
+            RenderedPage {
+                page_index: 0,
+                width: 1800,
+                height: 2400,
+                rgba: vec![255; 1800 * 2400 * 4],
+            }
+            .into(),
+        );
+        let start = Instant::now();
+        for _ in 0..200 {
+            std::hint::black_box(app.cached_page(0, 1800));
+        }
+        println!("cache_lookup_200={:?}", start.elapsed());
+    }
+
+    #[test]
+    fn stale_search_results_cannot_replace_current_document_results() {
+        let mut app = GlyphApp::with_context(&egui::Context::default(), None);
+        app.search_job_id = 4;
+        app.search_running = true;
+        app.search_result_tx
+            .send(SearchMessage::Finished {
+                id: 3,
+                cancelled: false,
+                result: Ok(vec![]),
+            })
+            .unwrap();
+        app.apply_search_results();
+        assert!(app.search_running);
+        app.search_result_tx
+            .send(SearchMessage::Finished {
+                id: 4,
+                cancelled: false,
+                result: Ok(vec![]),
+            })
+            .unwrap();
+        app.apply_search_results();
+        assert!(!app.search_running);
+        assert_eq!(app.status, "No matches found in selectable PDF text.");
+    }
+
+    #[test]
+    fn cancelling_search_invalidates_pending_messages() {
+        let mut app = GlyphApp::with_context(&egui::Context::default(), None);
+        app.search_running = true;
+        app.cancel_search();
+        assert!(app.search_cancel.load(Ordering::Relaxed));
+        assert!(!app.search_running);
+        assert_eq!(app.search_job_id, 1);
+    }
+
+    #[test]
+    fn normalized_overlays_follow_zoomed_and_panned_page_rect() {
+        let page = egui::Rect::from_min_size(egui::pos2(100., -50.), egui::vec2(1000., 2000.));
+        let rect = crate::core::links::PdfRect {
+            x: 0.1,
+            y: 0.2,
+            width: 0.3,
+            height: 0.1,
+        };
+        assert_eq!(
+            overlay_screen_rect(rect, page),
+            egui::Rect::from_min_max(egui::pos2(200., 350.), egui::pos2(500., 550.))
+        );
+    }
 
     #[test]
     fn format_zoom_label_rounds_to_whole_percent() {

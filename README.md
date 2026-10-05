@@ -11,7 +11,7 @@ Glyph is **not** a web wrapper. It is a native Rust desktop app.
 - UI: Rust native immediate-mode shell with `egui`/`wgpu`
 - PDF inspection/write path: Rust + `lopdf` first, `qpdf` integration later for hard PDF rewrites
 - Rendering path: PDFium via `pdfium-bundled`, embedded at build time so the app does not need a system PDFium install
-- Build path: Orange Pi develops/pushes; GitHub Actions produces x86_64 Linux artifacts
+- Development: native Rust builds/tests on an x86_64 Linux desktop; GitHub Actions produces Linux release artifacts
 
 ## Current visual MVP
 
@@ -20,7 +20,7 @@ Glyph is **not** a web wrapper. It is a native Rust desktop app.
 - PDF outline/bookmark sidebar with one-click page jumps
 - Page list/sidebar with previous/next navigation
 - Drag to pan
-- Scroll or +/- to zoom, Fit Page, Reset
+- Scroll or +/- to zoom, Fit Page (`Ctrl+1`), Fit Width (`Ctrl+2`), Reset (`Ctrl+0`)
 - Keyboard shortcuts: Ctrl+O, Arrow/Page keys, Home/End
 - Dark native shell
 
@@ -29,7 +29,7 @@ Glyph is **not** a web wrapper. It is a native Rust desktop app.
 Easiest path today:
 
 ```bash
-curl -fsSL https://github.com/dansc89/Glyph/releases/download/1.0.16/install-glyph-arch.sh | sh
+curl -fsSL https://github.com/dansc89/Glyph/releases/download/1.1/install-glyph-arch.sh | sh
 glyph
 ```
 
@@ -70,6 +70,24 @@ glyph
 That extracts the AppImage payload into your user profile and installs a normal detached `glyph` launcher, so runtime launch does not depend on FUSE or keeping a Terminal window open. See [`docs/arch-linux-install.md`](docs/arch-linux-install.md) for the release packaging guarantee.
 
 An Arch-friendly source package recipe lives at `packaging/arch/PKGBUILD` for later AUR packaging.
+
+## Local development features
+
+The current development branch adds full-document selectable-text search (Ctrl+F), highlighted results, internal hyperlink navigation, optional link highlights, and Back/Forward history (Alt+Left/Alt+Right). Search runs in the background and can be cancelled; OCR is not yet implemented. The Pages tab now has clickable, virtualized thumbnails. Drag over PDF text and use Ctrl+C to copy it; drag empty space or use the middle button to pan. Text extraction and preview rendering share the background renderer and use bounded resources.
+
+Auto bookmarks now detects sheet identifiers from selectable title-block text, rather than PDF page numbers. Hyperlinks matches exact cross-sheet references and skips self-links and ambiguous destinations. Both actions run in the background, show completion/no-op/error feedback, and save uniquely named copies without overwriting the source or previous exports. Scanned PDFs require OCR, which is not implemented. Generated links are idempotent and existing annotations are retained. Auto bookmarks replaces the saved copy’s existing bookmark hierarchy; the source hierarchy stays untouched. Sheet naming is heuristic: equally supported IDs stay undetected, and fallback page names never become hyperlink targets.
+
+Flatten is temporarily disabled: the former implementation removed annotations rather than preserving their appearance. Do not use it as a flattening solution.
+
+The supported Drawbridge parity target and outstanding gaps are tracked in [`docs/drawbridge-parity.md`](docs/drawbridge-parity.md). These changes are not a published release.
+
+## Omarchy integration
+
+The local build follows Omarchy's active colors (including light themes) and refreshes when the theme changes. It reads the staged palette under `$XDG_STATE_HOME/omarchy/current/theme/colors.toml`, defaulting to `~/.local/state/omarchy/current/theme/colors.toml`; it does not change desktop settings. The Wayland app ID matches `glyph.desktop`. Fit Width (`Ctrl+2`) top-aligns tall sheets; Fit Page (`Ctrl+1`) and Reset (`Ctrl+0`) work even while the search field has focus. Fitting is unavailable while inspecting a newly opened document. Fit modes now follow resizing and sheet changes until you zoom, pan or reset. Back/Forward restores the viewport as well as the page. Use `Ctrl+G` to enter a page number directly. Wheel zoom integrates input distance rather than smoothing-frame count.
+
+## Performance
+
+The local viewer refactor uses a retained PDFium session, bounded render scheduling, shared raster/texture caches, virtualized sidebars, background document inspection, and preserved zoom/pan when navigating sheets. Benchmarks, verification commands and limitations are in [`docs/performance.md`](docs/performance.md). Use the optimized `target/release/glyph` build for normal use, not the debug build.
 
 ## Product roadmap
 

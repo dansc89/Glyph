@@ -1,15 +1,28 @@
-use crate::core::links::{
-    LinkLabelHit, LinkProposal, PdfRect as LinkRect, generate_link_proposals,
-};
+pub use automation::SheetAnalysis;
+mod automation;
+pub mod overlay;
+pub mod search;
+mod session;
+mod text;
+use crate::core::links::LinkProposal;
 use crate::core::sheet::SheetCandidate;
 use lopdf::{Document, Object, ObjectId, dictionary};
 use pdfium_bundled::pdfium_render::prelude::{
     PdfBitmap, PdfBitmapFormat, PdfRenderConfig, Pdfium, PdfiumError,
 };
 use serde::{Deserialize, Serialize};
+pub use session::{PdfiumSession, bind_render_pdfium};
 use std::collections::HashMap;
 use std::path::Path;
+pub use text::{PageText, TextGlyph};
 use thiserror::Error;
+
+mod links;
+pub use links::InternalLinkIndex;
+pub use links::PdfInternalLink;
+// Retain the stateless extraction API for non-worker callers.
+#[allow(unused_imports)]
+pub use links::extract_internal_links;
 
 const MAX_RENDER_HEIGHT: i32 = 8_192;
 
@@ -178,6 +191,49 @@ fn install_bookmark_outline(
 fn install_link_annotations(doc: &mut Document, links: &[LinkProposal]) -> Result<usize, PdfError> {
     let pages = doc.get_pages();
     let mut written = 0usize;
+    let mut installed = HashMap::<ObjectId, std::collections::HashSet<(ObjectId, [u32; 4])>>::new();
+    for page_id in pages.values() {
+        let annotations = doc
+            .get_object(*page_id)
+            .ok()
+            .and_then(|o| o.as_dict().ok())
+            .and_then(|p| p.get(b"Annots").ok())
+            .and_then(|o| match o {
+                Object::Reference(id) => doc.get_object(*id).ok(),
+                _ => Some(o),
+            })
+            .and_then(|o| o.as_array().ok());
+        let keys = annotations
+            .into_iter()
+            .flatten()
+            .filter_map(|o| {
+                let o = match o {
+                    Object::Reference(id) => doc.get_object(*id).ok()?,
+                    _ => o,
+                };
+                let a = o.as_dict().ok()?;
+                if a.get(b"GlyphGenerated").and_then(Object::as_bool).ok() != Some(true) {
+                    return None;
+                }
+                let target = a
+                    .get(b"Dest")
+                    .ok()?
+                    .as_array()
+                    .ok()?
+                    .first()?
+                    .as_reference()
+                    .ok()?;
+                let rect = a.get(b"Rect").ok()?.as_array().ok()?;
+                let coords: Vec<_> = rect
+                    .iter()
+                    .filter_map(|o| o.as_float().ok().map(f32::to_bits))
+                    .collect();
+                let coords: [u32; 4] = coords.try_into().ok()?;
+                Some((target, coords))
+            })
+            .collect();
+        installed.insert(*page_id, keys);
+    }
     for link in links.iter().filter(|link| link.is_actionable()) {
         let Some(page_id) = pages.get(&((link.from_page + 1) as u32)).copied() else {
             continue;
@@ -185,9 +241,17 @@ fn install_link_annotations(doc: &mut Document, links: &[LinkProposal]) -> Resul
         let Some(target_page_id) = pages.get(&((link.target_page + 1) as u32)).copied() else {
             continue;
         };
-        let annot_id = doc.new_object_id();
         let rect = &link.rect;
+        let key = (
+            target_page_id,
+            [rect.x, rect.y, rect.x + rect.width, rect.y + rect.height].map(f32::to_bits),
+        );
+        if !installed.entry(page_id).or_default().insert(key) {
+            continue;
+        }
+        let annot_id = doc.new_object_id();
         let annotation = dictionary! {
+            "GlyphGenerated" => Object::Boolean(true),
             "Type" => Object::Name(b"Annot".to_vec()),
             "Subtype" => Object::Name(b"Link".to_vec()),
             "Rect" => Object::Array(vec![
@@ -212,6 +276,21 @@ fn append_annotation(
     page_id: ObjectId,
     annot_id: ObjectId,
 ) -> Result<(), PdfError> {
+    let indirect = doc
+        .get_object(page_id)
+        .and_then(Object::as_dict)
+        .map_err(|err| PdfError::Edit(err.to_string()))?
+        .get(b"Annots")
+        .ok()
+        .and_then(|o| o.as_reference().ok());
+    if let Some(id) = indirect {
+        let items = doc
+            .get_object_mut(id)
+            .and_then(Object::as_array_mut)
+            .map_err(|err| PdfError::Edit(format!("Invalid indirect annotation array: {err}")))?;
+        items.push(Object::Reference(annot_id));
+        return Ok(());
+    }
     let page = doc
         .get_object_mut(page_id)
         .and_then(Object::as_dict_mut)
@@ -337,7 +416,7 @@ impl PdfEngine for LopdfInspectionEngine {
             .map(|(page_number, object_id)| (*object_id, (*page_number as usize).saturating_sub(1)))
             .collect();
         let bookmarks = extract_bookmarks(&doc, &page_index_by_id);
-        let title = doc.trailer.get(b"Info").ok().and_then(|_| None);
+        let title = None;
         Ok(PdfDocumentSummary {
             page_count,
             pages,
@@ -427,7 +506,7 @@ fn outline_target_page(
     match dest {
         Object::Array(items) => items
             .first()
-            .and_then(|item| page_object_id(item))
+            .and_then(page_object_id)
             .and_then(|page_id| page_index_by_id.get(&page_id).copied()),
         Object::Reference(page_id) => page_index_by_id.get(page_id).copied(),
         _ => None,
@@ -437,7 +516,7 @@ fn outline_target_page(
 fn page_object_id(object: &Object) -> Option<ObjectId> {
     match object {
         Object::Reference(page_id) => Some(*page_id),
-        Object::Dictionary(dict) => dict.get(b"Parent").ok().and_then(|_| None),
+        Object::Dictionary(_) => None,
         _ => None,
     }
 }
@@ -521,37 +600,7 @@ impl PdfiumRenderEngine {
         path: &Path,
         sheets: &[SheetCandidate],
     ) -> Result<Vec<LinkProposal>, PdfError> {
-        validate_pdf_path(path)?;
-        let pdfium = bind_bundled_pdfium()?;
-        let document = pdfium
-            .load_pdf_from_file(path, None)
-            .map_err(map_pdfium_load_error)?;
-        let mut hits = Vec::new();
-        for page_index in 0..document.pages().len() as usize {
-            let page = document
-                .pages()
-                .get(page_index as i32)
-                .map_err(|err| PdfError::Load(err.to_string()))?;
-            let text = page.text().map_err(|err| PdfError::Load(err.to_string()))?;
-            for segment in text.segments().iter() {
-                let label_text = segment.text();
-                if crate::core::sheet::normalize_sheet_id(&label_text).is_none() {
-                    continue;
-                }
-                let bounds = segment.bounds();
-                hits.push(LinkLabelHit {
-                    from_page: page_index,
-                    label: label_text,
-                    rect: LinkRect {
-                        x: bounds.left().value,
-                        y: bounds.bottom().value,
-                        width: bounds.width().value,
-                        height: bounds.height().value,
-                    },
-                });
-            }
-        }
-        Ok(generate_link_proposals(&hits, sheets))
+        automation::generate_links(path, sheets)
     }
 }
 
@@ -696,8 +745,10 @@ mod tests {
         assert!(
             rendered
                 .rgba
-                .chunks_exact(4)
-                .any(|pixel| pixel != [255, 255, 255, 255])
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|pixel| *pixel != [255, 255, 255, 255])
         );
     }
 
@@ -727,8 +778,10 @@ mod tests {
         assert!(tile.contains(&request));
         assert!(
             tile.rgba
-                .chunks_exact(4)
-                .any(|pixel| pixel != [255, 255, 255, 255])
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|pixel| *pixel != [255, 255, 255, 255])
         );
     }
 

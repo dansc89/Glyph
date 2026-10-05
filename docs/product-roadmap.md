@@ -8,7 +8,8 @@ Glyph is a standalone PDF editor for Arch Linux.
 - Load PDF by file picker, pasted path, CLI argument, desktop file `%f`, and drag-and-drop.
 - PDFium page rendering with real-PDF render smoke test.
 - Page sidebar, previous/next navigation, Home/End, arrow/page-key navigation.
-- Zoom, reset, fit-page, drag panning.
+- Distance-integrated wheel zoom, reset, persistent fit-page (`Ctrl+1`), persistent fit-width (`Ctrl+2`, top-aligns tall sheets), drag panning.
+- Direct page entry (`Ctrl+G`) and bounded Back/Forward history restoring page, zoom, pan and fit mode.
 - Arch-friendly AppImage/tar.gz path plus `.deb` and Arch `PKGBUILD` starter.
 - PDF outline/bookmark extraction and sidebar jump targets.
 

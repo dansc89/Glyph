@@ -16,10 +16,12 @@ jobs:
       - name: Install Linux GUI/package deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config libssl-dev libx11-dev libxi-dev libgl1-mesa-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev desktop-file-utils fakeroot wget xvfb xdotool ffmpeg
+          sudo apt-get install -y build-essential pkg-config libssl-dev libx11-dev libxi-dev libgl1-mesa-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev desktop-file-utils fakeroot wget xvfb xdotool ffmpeg python3-pil tesseract-ocr xclip
           cargo install cargo-deb --locked
       - name: Check formatting
         run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
       - name: Reset Pdfium bundled cache
         run: rm -rf ~/.cache/pdfium-bundled
       - name: Test
@@ -28,6 +30,8 @@ jobs:
         run: cargo build --locked --release
       - name: GUI smoke test
         run: python3 scripts/gui-qa.py --skip-build --out dist/gui-qa
+      - name: Viewer regression checks
+        run: python3 scripts/performance-qa.py --binary target/release/glyph --out dist/viewer-qa
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -36,6 +40,7 @@ jobs:
             dist/gui-qa/*.png
             dist/gui-qa/*.txt
             dist/gui-qa/*.log
+            dist/viewer-qa/
       - name: Check portable runtime deps
         run: |
           mkdir -p dist

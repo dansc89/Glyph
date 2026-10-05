@@ -12,21 +12,29 @@ pub struct SheetCandidate {
 }
 
 pub fn normalize_sheet_id(raw: &str) -> Option<SheetId> {
-    let cleaned = raw
-        .trim()
-        .replace(' ', "")
-        .replace('–', "-")
-        .replace('—', "-");
-    if cleaned.len() < 2 || cleaned.len() > 24 {
+    let cleaned = raw.trim().replace(' ', "").replace(['–', '—'], "-");
+    let cleaned = cleaned.to_uppercase();
+    let prefix_len = cleaned.bytes().take_while(u8::is_ascii_alphabetic).count();
+    let prefix = &cleaned[..prefix_len];
+    // Discipline designators, not arbitrary equipment names or words.
+    if !matches!(
+        prefix,
+        "A" | "AD" | "AS" | "C" | "E" | "F" | "G" | "I" | "L" | "M" | "P" | "S" | "T" | "Q"
+    ) {
         return None;
     }
-    let has_digit = cleaned.chars().any(|c| c.is_ascii_digit());
-    let has_letter = cleaned.chars().any(|c| c.is_ascii_alphabetic());
-    if has_digit && has_letter {
-        Some(SheetId(cleaned.to_uppercase()))
+    let number = cleaned[prefix_len..]
+        .strip_prefix('-')
+        .unwrap_or(&cleaned[prefix_len..]);
+    let valid = if let Some((major, minor)) = number.split_once('.') {
+        (1..=2).contains(&major.len())
+            && minor.len() == 2
+            && major.bytes().all(|c| c.is_ascii_digit())
+            && minor.bytes().all(|c| c.is_ascii_digit())
     } else {
-        None
-    }
+        number.len() == 3 && number.bytes().all(|c| c.is_ascii_digit())
+    };
+    valid.then_some(SheetId(cleaned))
 }
 
 pub fn generate_bookmark_titles(
@@ -68,6 +76,23 @@ mod tests {
     fn normalizes_common_sheet_ids() {
         assert_eq!(normalize_sheet_id(" a-101 ").unwrap().0, "A-101");
         assert_eq!(normalize_sheet_id("E 2.01").unwrap().0, "E2.01");
+    }
+
+    #[test]
+    fn rejects_words_and_equipment_model_codes() {
+        for noise in [
+            "MODEL123",
+            "AHU-101",
+            "PUMP2.01",
+            "A-1010",
+            "X123",
+            "A-101-LOW",
+        ] {
+            assert!(normalize_sheet_id(noise).is_none(), "{noise}");
+        }
+        for id in ["A-101", "A1.01", "E2.01", "L1.11"] {
+            assert_eq!(normalize_sheet_id(id).unwrap().0, id);
+        }
     }
 
     #[test]
