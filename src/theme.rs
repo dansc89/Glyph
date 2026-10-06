@@ -269,18 +269,18 @@ fn apply_style(ctx: &egui::Context) {
 
     let mut style = (*ctx.style_of(theme)).clone();
     style.visuals = visuals;
-    style.spacing.item_spacing = egui::vec2(8.0, 8.0);
-    style.spacing.button_padding = egui::vec2(10.0, 5.0);
+    style.spacing.item_spacing = egui::vec2(4.0, 4.0);
+    style.spacing.button_padding = egui::vec2(6.0, 3.0);
     style.spacing.window_margin = egui::Margin::same(8);
     style
         .text_styles
-        .insert(egui::TextStyle::Heading, egui::FontId::proportional(19.0));
+        .insert(egui::TextStyle::Heading, egui::FontId::proportional(16.0));
     style
         .text_styles
-        .insert(egui::TextStyle::Button, egui::FontId::monospace(12.5));
+        .insert(egui::TextStyle::Button, egui::FontId::proportional(11.5));
     style
         .text_styles
-        .insert(egui::TextStyle::Body, egui::FontId::proportional(13.0));
+        .insert(egui::TextStyle::Body, egui::FontId::proportional(12.0));
     ctx.set_style_of(theme, style);
 }
 

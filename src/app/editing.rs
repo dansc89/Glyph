@@ -1575,7 +1575,13 @@ mod tests {
                         assert_eq!(e.stroke.width, 2.);
                         *oval = true;
                     }
-                    egui::epaint::Shape::Text(t) if t.galley.text() == "Ellipse" => *toolbar = true,
+                    egui::epaint::Shape::Ellipse(e) if e.radius == egui::vec2(7., 5.5) => {
+                        assert_eq!(e.fill, egui::Color32::TRANSPARENT);
+                        assert_eq!(e.stroke.width, 1.5);
+                        // Pending worker work disables the controls; witness the
+                        // selected, enabled toolbar ink before that transition.
+                        *toolbar |= e.stroke.color == crate::theme::color(crate::theme::ACCENT);
+                    }
                     egui::epaint::Shape::Vec(v) => {
                         for s in v {
                             check(s, oval, toolbar);
@@ -1589,6 +1595,7 @@ mod tests {
             }
             out.textures_delta.clear();
         }
+        assert!(app.markup.mode == markup::Mode::Ellipse);
         assert!(
             oval && toolbar,
             "ellipse ghost and toolbar must be real ellipse UI"
@@ -1713,24 +1720,20 @@ mod tests {
         );
     }
     fn click_retry_preview(app: &mut GlyphApp, ctx: &egui::Context) {
-        fn find(shape: &egui::epaint::Shape) -> Option<egui::Pos2> {
-            match shape {
-                egui::epaint::Shape::Text(t) if t.galley.text() == "Retry preview" => {
-                    Some(t.pos + t.galley.size() / 2.)
-                }
-                egui::epaint::Shape::Vec(v) => v.iter().find_map(find),
-                _ => None,
-            }
-        }
-        let mut point = None;
+        let mut response = None;
         for _ in 0..3 {
             let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
-                app.draw_markup_tools(ui, ctx)
+                let id = ui.make_persistent_id(("native-icon", crate::app::icons::Icon::Retry));
+                app.draw_markup_tools(ui, ctx);
+                response = ctx.read_response(id);
             });
-            point = out.shapes.iter().find_map(|s| find(&s.shape));
             out.textures_delta.clear();
         }
-        let pos = point.expect("Preview error must expose a mouse-accessible Retry preview button");
+        let response =
+            response.expect("Preview error must expose a mouse-accessible Retry preview button");
+        assert!(response.enabled());
+        assert_eq!(response.rect.size(), egui::Vec2::splat(24.));
+        let pos = response.rect.center();
         let mut out = ctx.run_ui(
             egui::RawInput {
                 events: vec![
@@ -2238,37 +2241,135 @@ mod tests {
         );
     }
     #[test]
-    fn navigation_controls_use_font_independent_ascii_labels() {
-        fn count(s: &egui::epaint::Shape) -> usize {
+    fn navigation_controls_use_font_independent_vector_controls() {
+        fn collect(s: &egui::epaint::Shape, lines: &mut Vec<([egui::Pos2; 2], egui::Stroke)>) {
             match s {
-                egui::epaint::Shape::Text(t) => {
-                    usize::from(matches!(t.galley.text(), "< Prev" | "Next >"))
+                egui::epaint::Shape::LineSegment { points, stroke } => {
+                    lines.push((*points, *stroke));
                 }
-                egui::epaint::Shape::Vec(v) => v.iter().map(count).sum(),
-                _ => 0,
+                egui::epaint::Shape::Text(t) => {
+                    assert!(!matches!(t.galley.text(), "< Prev" | "Next >"));
+                    assert!(
+                        !t.galley.text().contains(['←', '→', '◀', '▶']),
+                        "Navigation must not depend on missing arrow glyphs in the desktop font"
+                    );
+                }
+                egui::epaint::Shape::Vec(v) => {
+                    for s in v {
+                        collect(s, lines);
+                    }
+                }
+                _ => {}
             }
+        }
+        // Locate the actual sidebar arrows by their three vector strokes, not
+        // separately rendered icons or text/font metrics. Their centers are the
+        // centers of the native 24-point pointer targets.
+        fn arrow_centers(lines: &[([egui::Pos2; 2], egui::Stroke)], d: f32) -> Vec<egui::Pos2> {
+            lines
+                .iter()
+                .filter_map(|(points, stroke)| {
+                    if stroke.width != 1.5 || points[1] - points[0] != egui::vec2(12. * d, 0.) {
+                        return None;
+                    }
+                    let center = points[0] + egui::vec2(6. * d, 0.);
+                    let target = egui::Rect::from_center_size(center, egui::Vec2::splat(24.));
+                    let sidebar =
+                        egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(280., 640.));
+                    if !sidebar.contains_rect(target) {
+                        return None;
+                    }
+                    for y in [-5., 5.] {
+                        let expected = [center + egui::vec2(d, y), center + egui::vec2(6. * d, 0.)];
+                        let (points, _) = lines
+                            .iter()
+                            .find(|(points, s)| *points == expected && *s == *stroke)?;
+                        assert!(
+                            target.contains_rect(
+                                egui::Rect::from_two_pos(points[0], points[1])
+                                    .expand(stroke.width / 2.)
+                            )
+                        );
+                    }
+                    assert!(target.contains_rect(
+                        egui::Rect::from_two_pos(points[0], points[1]).expand(stroke.width / 2.)
+                    ));
+                    Some(center)
+                })
+                .collect()
         }
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("plan.pdf");
         fixture(&path);
         let ctx = egui::Context::default();
         let mut app = setup(&path, &ctx);
-        let mut o = ctx.run_ui(
-            egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(
-                    egui::Pos2::ZERO,
-                    egui::vec2(960., 640.),
-                )),
-                ..Default::default()
-            },
-            |ui| app.draw(ui),
-        );
-        let n: usize = o.shapes.iter().map(|s| count(&s.shape)).sum();
-        o.textures_delta.clear();
+        let frame = |app: &mut GlyphApp, events| {
+            let mut out = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(960., 640.),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ui| app.draw(ui),
+            );
+            out.textures_delta.clear();
+            out
+        };
+        let mut out = frame(&mut app, vec![]);
+        for _ in 0..2 {
+            out = frame(&mut app, vec![]);
+        }
+        let mut lines = Vec::new();
+        for s in &out.shapes {
+            let mut shape_lines = Vec::new();
+            collect(&s.shape, &mut shape_lines);
+            // The app also has a central toolbar; only sidebar-clipped ink
+            // proves the sidebar navigation pair is actually wired.
+            if s.clip_rect.max.x <= 280. {
+                lines.extend(shape_lines);
+            }
+        }
+        let previous = arrow_centers(&lines, -1.);
+        let next = arrow_centers(&lines, 1.);
         assert_eq!(
-            n, 2,
-            "Navigation must not depend on missing arrow glyphs in the desktop font"
+            previous.len(),
+            1,
+            "Actual app sidebar must paint Previous arrow"
         );
+        assert_eq!(next.len(), 1, "Actual app sidebar must paint Next arrow");
+        assert_eq!(previous[0].y, next[0].y);
+        assert!(previous[0].x + 24. <= next[0].x);
+        assert_eq!(app.project.selected_page, 1);
+        for (pos, label, expected_page) in
+            [(previous[0], "Previous page", 0), (next[0], "Next page", 1)]
+        {
+            frame(
+                &mut app,
+                vec![egui::Event::PointerMoved(pos), pointer(pos, true)],
+            );
+            let out = frame(
+                &mut app,
+                vec![egui::Event::PointerMoved(pos), pointer(pos, false)],
+            );
+            assert_eq!(
+                app.project.selected_page, expected_page,
+                "{label} must navigate by mouse"
+            );
+            assert!(
+                out.platform_output.events.iter().any(|event| {
+                    let info = event.widget_info();
+                    matches!(event, egui::output::OutputEvent::Clicked(_))
+                        && info.typ == egui::WidgetType::Button
+                        && info.label.as_deref() == Some(label)
+                        && info.enabled
+                        && info.selected == Some(false)
+                }),
+                "{label} must emit named button information on the actual app click"
+            );
+        }
     }
     #[test]
     fn lost_edit_session_disables_bookmark_context_rename() {

@@ -35,61 +35,35 @@ impl GlyphApp {
         ctx.request_repaint();
     }
     pub(super) fn draw_markup_tools(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        use super::icons::{self, Icon};
         if self.preview_unavailable()
-            && ui
-                .add_enabled(
-                    !self.edit_pending()
-                        && self.loading_document.is_none()
-                        && self.automation_rx.is_none()
-                        && !self.editing_modal_open(),
-                    tool_chip_button("Retry preview"),
-                )
-                .clicked()
+            && icons::button(
+                ui,
+                Icon::Retry,
+                !self.edit_pending()
+                    && self.loading_document.is_none()
+                    && self.automation_rx.is_none()
+                    && !self.editing_modal_open(),
+                false,
+            )
+            .clicked()
         {
             self.load_markups(ctx);
         }
         let ready = self.can_change_markups();
-        for (mode, label, hint) in [
-            (Mode::View, "View", "Pan and select PDF text; Escape"),
-            (Mode::Select, "Select markup", "Select Glyph shapes; V"),
-            (
-                Mode::Rectangle,
-                "Rectangle",
-                "Drag a red, unfilled rectangle; R",
-            ),
-            (Mode::Ellipse, "Ellipse", "Drag a red, unfilled ellipse; E"),
+        for (mode, icon) in [
+            (Mode::View, Icon::View),
+            (Mode::Select, Icon::Select),
+            (Mode::Rectangle, Icon::Rectangle),
+            (Mode::Ellipse, Icon::Ellipse),
         ] {
-            let stroke = if self.markup.mode == mode {
-                theme::color(theme::ACCENT)
-            } else {
-                theme::color(theme::STROKE)
-            };
-            if ui
-                .add_enabled(
-                    ready,
-                    tool_chip_button(label).stroke(egui::Stroke::new(1., stroke)),
-                )
-                .on_hover_text(hint)
-                .clicked()
-            {
+            if icons::button(ui, icon, ready, self.markup.mode == mode).clicked() {
                 self.choose_markup_mode(mode, ctx);
             }
         }
-        if ui
-            .add_enabled(
-                self.can_delete_selected_markup(),
-                tool_chip_button("Delete"),
-            )
-            .on_hover_text("Delete selected Glyph shape; Delete/Backspace")
-            .clicked()
-        {
+        if icons::button(ui, Icon::Delete, self.can_delete_selected_markup(), false).clicked() {
             self.delete_selected_markup(ctx);
         }
-        ui.label(
-            egui::RichText::new("Red · 2 pt")
-                .size(11.)
-                .color(theme::color(theme::TEXT_MUTED)),
-        );
     }
     pub(super) fn markup_shortcuts(&mut self, ctx: &egui::Context) {
         if ctx.egui_wants_keyboard_input()
@@ -412,6 +386,29 @@ impl BoundingBoxGesture {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn markup_toolbar_is_five_compact_targets_without_persistent_style_label() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx);
+        let mut bounds = egui::Rect::NOTHING;
+        let mut output = ctx.run_ui(Default::default(), |ui| {
+            bounds = ui
+                .horizontal(|ui| app.draw_markup_tools(ui, &ctx))
+                .response
+                .rect;
+        });
+        output.textures_delta.clear();
+        assert_eq!(
+            bounds.height(),
+            24.,
+            "markup tools must use 24-point targets"
+        );
+        assert!(
+            bounds.width() <= 152.,
+            "five icons should replace text chips and the style label: {bounds:?}"
+        );
+    }
+
     fn click(pos: egui::Pos2, pressed: bool) -> egui::Event {
         egui::Event::PointerButton {
             pos,

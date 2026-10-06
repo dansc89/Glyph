@@ -1,5 +1,8 @@
 mod automation;
+#[cfg(test)]
+mod compact_tests;
 mod editing;
+mod icons;
 mod markup;
 mod render_worker;
 #[cfg(test)]
@@ -1551,7 +1554,7 @@ impl GlyphApp {
                 egui::Frame::new()
                     .fill(theme::color(theme::SURFACE))
                     .stroke(egui::Stroke::new(1.0, theme::color(theme::STROKE_STRONG)))
-                    .inner_margin(egui::Margin::symmetric(12, 8)),
+                    .inner_margin(egui::Margin::symmetric(8, 3)),
             )
             .show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
@@ -1572,13 +1575,13 @@ impl GlyphApp {
                         egui::Label::new(
                             egui::RichText::new(&title)
                                 .monospace()
-                                .size(13.)
+                                .size(12.)
                                 .color(theme::color(theme::TEXT)),
                         )
                         .truncate(),
                     )
                     .on_hover_text(title);
-                    ui.add_space(12.0);
+                    ui.add_space(4.0);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         metric_pill(ui, &format_zoom_label(self.zoom));
                         if let Some(count) = self.page_count() {
@@ -1594,47 +1597,44 @@ impl GlyphApp {
         if self.sidebar_collapsed {
             egui::Panel::left("sheet_sidebar_collapsed")
                 .resizable(false)
-                .default_size(46.0)
-                .size_range(46.0..=46.0)
+                .default_size(34.0)
+                .size_range(34.0..=34.0)
                 .frame(
                     egui::Frame::new()
                         .fill(theme::color(theme::PANEL))
                         .stroke(egui::Stroke::new(1.0, theme::color(theme::STROKE_STRONG)))
-                        .inner_margin(egui::Margin::symmetric(6, 12)),
+                        .inner_margin(egui::Margin::symmetric(4, 4)),
                 )
                 .show(ui, |ui| {
                     ui.vertical_centered(|ui| {
-                        if sidebar_toggle_button(ui, ">", "Show sidebar").clicked() {
+                        if icons::button(ui, icons::Icon::Sidebar, true, false)
+                            .on_hover_text("Show sidebar")
+                            .clicked()
+                        {
                             self.sidebar_collapsed = false;
                         }
-                        ui.add_space(8.0);
-                        ui.label(
-                            egui::RichText::new("NAV")
-                                .monospace()
-                                .size(10.0)
-                                .color(theme::color(theme::TEXT_FAINT)),
-                        );
                     });
                 });
         } else {
             egui::Panel::left("sheet_sidebar")
                 .resizable(true)
-                .default_size(328.0)
-                .size_range(260.0..=420.0)
+                .default_size(220.0)
+                .size_range(180.0..=280.0)
                 .frame(
                     egui::Frame::new()
                         .fill(theme::color(theme::PANEL))
                         .stroke(egui::Stroke::new(1.0, theme::color(theme::STROKE_STRONG)))
-                        .inner_margin(egui::Margin::symmetric(10, 12)),
+                        .inner_margin(egui::Margin::symmetric(6, 4)),
                 )
                 .show(ui, |ui| {
                     ui.vertical(|ui| {
-                        if sidebar_wide_toggle_button(ui, "<  Hide sidebar", "Hide sidebar")
+                        if icons::button(ui, icons::Icon::Sidebar, true, true)
+                            .on_hover_text("Hide sidebar")
                             .clicked()
                         {
                             self.sidebar_collapsed = true;
                         }
-                        ui.add_space(8.0);
+                        ui.add_space(2.0);
 
                         if let Some(document) = &self.project.document {
                             let display_name = document.display_name();
@@ -1644,7 +1644,7 @@ impl GlyphApp {
                                 .fill(theme::color(theme::CARD))
                                 .stroke(egui::Stroke::new(1.0, theme::color(theme::STROKE)))
                                 .corner_radius(egui::CornerRadius::same(4))
-                                .inner_margin(egui::Margin::symmetric(10, 8))
+                                .inner_margin(egui::Margin::symmetric(6, 4))
                                 .show(ui, |ui| {
                                     ui.horizontal(|ui| {
                                         ui.label(
@@ -1658,7 +1658,7 @@ impl GlyphApp {
                                             egui::Label::new(
                                                 egui::RichText::new(&display_name)
                                                     .monospace()
-                                                    .size(13.0)
+                                                    .size(12.0)
                                                     .strong()
                                                     .color(theme::color(theme::TEXT)),
                                             )
@@ -1675,64 +1675,47 @@ impl GlyphApp {
                                         .color(theme::color(theme::TEXT_MUTED)),
                                     );
                                 });
-                            ui.add_space(8.0);
+                            ui.add_space(2.0);
                             ui.horizontal(|ui| {
-                                if ui
-                                    .add_enabled(
-                                        self.can_go_previous(),
-                                        egui::Button::new("< Prev")
-                                            .fill(theme::color(theme::CONTROL))
-                                            .corner_radius(4),
-                                    )
-                                    .clicked()
+                                if icons::button(
+                                    ui,
+                                    icons::Icon::ArrowLeft,
+                                    self.can_go_previous(),
+                                    false,
+                                )
+                                .on_hover_text("Previous page · Left")
+                                .clicked()
                                 {
                                     self.previous_page(&ctx);
                                 }
-                                if ui
-                                    .add_enabled(
-                                        self.can_go_next(),
-                                        egui::Button::new("Next >")
-                                            .fill(theme::color(theme::CONTROL))
-                                            .corner_radius(4),
-                                    )
-                                    .clicked()
+                                if icons::button(
+                                    ui,
+                                    icons::Icon::ArrowRight,
+                                    self.can_go_next(),
+                                    false,
+                                )
+                                .on_hover_text("Next page · Right")
+                                .clicked()
                                 {
                                     self.next_page(&ctx);
                                 }
-                            });
-                            ui.add_space(12.0);
-
-                            ui.horizontal(|ui| {
-                                if nav_tab_button(
-                                    ui,
-                                    "Pages",
-                                    self.navigation_tab == NavigationTab::Pages,
-                                )
-                                .clicked()
-                                {
-                                    self.navigation_tab = NavigationTab::Pages;
-                                }
-                                if nav_tab_button(
-                                    ui,
-                                    "Bookmarks",
-                                    self.navigation_tab == NavigationTab::Bookmarks,
-                                )
-                                .clicked()
-                                {
-                                    self.navigation_tab = NavigationTab::Bookmarks;
+                                ui.separator();
+                                for (tab, icon) in [
+                                    (NavigationTab::Pages, icons::Icon::Pages),
+                                    (NavigationTab::Bookmarks, icons::Icon::Bookmarks),
+                                    (NavigationTab::Search, icons::Icon::Search),
+                                ] {
+                                    if icons::button(ui, icon, true, self.navigation_tab == tab)
+                                        .clicked()
+                                    {
+                                        self.navigation_tab = tab;
+                                        if tab == NavigationTab::Search {
+                                            self.search_focus_requested = true;
+                                        }
+                                    }
                                 }
                             });
-                            if nav_tab_button(
-                                ui,
-                                "Search",
-                                self.navigation_tab == NavigationTab::Search,
-                            )
-                            .clicked()
-                            {
-                                self.navigation_tab = NavigationTab::Search;
-                                self.search_focus_requested = true;
-                            }
-                            ui.add_space(8.0);
+                            ui.add_space(2.0);
 
                             match self.navigation_tab {
                                 NavigationTab::Search => self.search_sidebar(ui, &ctx),
@@ -1781,12 +1764,12 @@ impl GlyphApp {
                                 .fill(theme::color(theme::CARD))
                                 .stroke(egui::Stroke::new(1.0, theme::color(theme::STROKE)))
                                 .corner_radius(egui::CornerRadius::same(4))
-                                .inner_margin(egui::Margin::same(14))
+                                .inner_margin(egui::Margin::same(6))
                                 .show(ui, |ui| {
                                     ui.horizontal(|ui| {
                                         ui.label(
                                             egui::RichText::new("No PDF loaded")
-                                                .size(16.0)
+                                                .size(12.0)
                                                 .strong()
                                                 .color(theme::color(theme::TEXT)),
                                         );
@@ -1807,19 +1790,32 @@ impl GlyphApp {
                 egui::Frame::new()
                     .fill(theme::color(theme::PANEL))
                     .stroke(egui::Stroke::new(1.0, theme::color(theme::STROKE_STRONG)))
-                    .inner_margin(egui::Margin::symmetric(12, 6)),
+                    .inner_margin(egui::Margin::symmetric(8, 1)),
             )
             .show(ui, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(egui::RichText::new("▣").color(theme::color(theme::ACCENT)));
-                    ui.add(egui::Label::new(egui::RichText::new(self.persistent_edit_error().unwrap_or(&self.status)).color(if self.persistent_edit_error().is_some(){egui::Color32::LIGHT_RED}else{theme::color(theme::TEXT_MUTED)})).truncate()).on_hover_text(self.persistent_edit_error().unwrap_or(&self.status));
-                    ui.separator();
-                    ui.label(
-                        egui::RichText::new(
-                            "Ctrl+O open · Ctrl+F search · Alt+Left/Right history · middle drag pans · scroll zoom",
-                        )
-                        .color(theme::color(theme::TEXT_MUTED)),
-                    );
+                ui.horizontal(|ui| {
+                    let error = self.persistent_edit_error();
+                    let status = error.unwrap_or(&self.status);
+                    let width = (ui.available_width() - 28.).max(0.);
+                    ui.add_sized(
+                        [width, 24.],
+                        egui::Label::new(egui::RichText::new(status).color(if error.is_some() {
+                            egui::Color32::LIGHT_RED
+                        } else {
+                            theme::color(theme::TEXT_MUTED)
+                        }))
+                        .truncate(),
+                    )
+                    .on_hover_text(status);
+                    let help = icons::button(ui, icons::Icon::Help, true, false);
+                    egui::Popup::menu(&help).show(|ui| {
+                        ui.label("Keyboard & canvas");
+                        ui.separator();
+                        ui.label("Ctrl+O open · Ctrl+S save · Ctrl+Shift+S save copy");
+                        ui.label("Ctrl+F search · Ctrl+G page");
+                        ui.label("Ctrl+1 fit page · Ctrl+2 fit width");
+                        ui.label("Alt+Left/Right history · middle drag pans · scroll zoom");
+                    });
                 });
             });
 
@@ -1827,56 +1823,69 @@ impl GlyphApp {
             .frame(
                 egui::Frame::new()
                     .fill(theme::color(theme::CANVAS))
-                    .inner_margin(egui::Margin::same(14)),
+                    .inner_margin(egui::Margin::same(6)),
             )
             .show(ui, |ui| {
                 egui::Frame::new()
                     .fill(theme::color(theme::PANEL))
                     .stroke(egui::Stroke::new(1.0, theme::color(theme::STROKE)))
                     .corner_radius(egui::CornerRadius::same(4))
-                    .inner_margin(egui::Margin::symmetric(8, 6))
+                    .inner_margin(egui::Margin::symmetric(4, 3))
                     .show(ui, |ui| {
-                        ui.horizontal_wrapped(|ui| {
-                            if ui.add_enabled(self.navigation_history.can_back(), egui::Button::new("Back")).on_hover_text("Alt+Left").clicked() { self.go_back(&ctx); }
-                            if ui.add_enabled(self.navigation_history.can_forward(), egui::Button::new("Forward")).on_hover_text("Alt+Right").clicked() { self.go_forward(&ctx); }
-                            if tool_chip(ui, "−").clicked() {
+                        ui.horizontal(|ui| {
+                            let ready = self.project.document.is_some() && self.loading_document.is_none();
+                            let back_enabled = ready && self.navigation_history.can_back();
+                            let back = icons::button_named(ui, icons::Icon::ArrowLeft, back_enabled, false, "Back", "Back · Alt+Left");
+                            if back.clicked() { self.go_back(&ctx); }
+                            let forward_enabled = ready && self.navigation_history.can_forward();
+                            let forward = icons::button_named(ui, icons::Icon::ArrowRight, forward_enabled, false, "Forward", "Forward · Alt+Right");
+                            if forward.clicked() { self.go_forward(&ctx); }
+                            ui.separator();
+                            if icons::button(ui, icons::Icon::ZoomOut, ready, false).clicked() {
                                 self.zoom = (self.zoom * 0.9).max(MIN_ZOOM);
                                 self.manual_view_changed();
                                 ctx.request_repaint();
                             }
-                            metric_pill(ui, &format_zoom_label(self.zoom));
-                            if tool_chip(ui, "+").clicked() {
+                            ui.add_sized([42., 24.], egui::Label::new(format_zoom_label(self.zoom)).truncate());
+                            if icons::button(ui, icons::Icon::ZoomIn, ready, false).clicked() {
                                 self.zoom = (self.zoom * 1.1).min(MAX_ZOOM);
                                 self.manual_view_changed();
                                 ctx.request_repaint();
                             }
-                            self.draw_page_entry(ui);
-                            ui.add_space(8.0);
-                            if ui.add_enabled(self.loading_document.is_none(), tool_chip_button("Fit page")).on_disabled_hover_text("Available after the document finishes loading.").on_hover_text("Ctrl+1").clicked() {
+                            if icons::button(ui, icons::Icon::FitPage, ready, self.fit_mode == FitMode::Page).on_hover_text("Fit page · Ctrl+1").clicked() {
                                 self.fit_to_page_requested = true;
                                 self.fit_to_width_requested = false;
                             }
-                            if ui.add_enabled(self.loading_document.is_none(), tool_chip_button("Fit width")).on_disabled_hover_text("Available after the document finishes loading.").on_hover_text("Ctrl+2").clicked() {
+                            if icons::button(ui, icons::Icon::FitWidth, ready, self.fit_mode == FitMode::Width).on_hover_text("Fit width · Ctrl+2").clicked() {
                                 self.fit_to_width_requested = true;
                                 self.fit_to_page_requested = false;
                             }
-                            if tool_chip(ui, "Reset").clicked() {
-                                self.reset_view();
-                            }
-                            ui.add_space(12.0);
-                            if tool_chip(ui, "Auto bookmarks").on_hover_text("Saves a new copy and replaces its existing bookmark hierarchy with detected sheet numbers. The original PDF is unchanged.").clicked() {
-                                self.generate_bookmarks_for_current_pdf(&ctx);
-                            }
-                            if tool_chip(ui, "Hyperlinks").clicked() {
-                                self.generate_hyperlinks_for_current_pdf(&ctx);
-                            }
-                            ui.add_enabled(false, egui::Button::new("Flatten"))
-                                .on_disabled_hover_text("Temporarily disabled: appearance-preserving, reversible flattening is not implemented yet.");
-                            ui.checkbox(&mut self.show_link_highlights, "Show links");
+                            if icons::button(ui, icons::Icon::Reset, ready, false).clicked() { self.reset_view(); }
+                            ui.separator();
+                            self.draw_page_entry(ui);
+                            ui.separator();
+                            self.draw_markup_tools(ui, &ctx);
+                            let more = icons::button(ui, icons::Icon::More, true, false);
+                            egui::Popup::menu(&more).show(|ui| {
+                                let automation_ready = ready && self.automation_rx.is_none()
+                                    && !self.edit_pending() && !self.editing_modal_open() && !self.editing.dirty;
+                                if ui.add_enabled(automation_ready, egui::Button::new("Auto bookmarks"))
+                                    .on_hover_text("Saves a new copy and replaces its existing bookmark hierarchy with detected sheet numbers. The original PDF is unchanged.")
+                                    .on_disabled_hover_text("Load a PDF and save or discard edits before running automation.").clicked() {
+                                    self.generate_bookmarks_for_current_pdf(&ctx);
+                                    ui.close();
+                                }
+                                if ui.add_enabled(automation_ready, egui::Button::new("Hyperlinks")).on_hover_text("Creates a new linked copy; the original PDF is unchanged.").clicked() {
+                                    self.generate_hyperlinks_for_current_pdf(&ctx);
+                                    ui.close();
+                                }
+                                ui.add_enabled(false, egui::Button::new("Flatten"))
+                                    .on_disabled_hover_text("Temporarily disabled: appearance-preserving, reversible flattening is not implemented yet.");
+                                ui.add_enabled(ready, egui::Checkbox::new(&mut self.show_link_highlights, "Show links"));
+                            });
                         });
-                        ui.horizontal_wrapped(|ui|self.draw_markup_tools(ui,&ctx));
                     });
-                ui.add_space(12.0);
+                ui.add_space(4.0);
                 if let Some(error)=&self.text_error {ui.label(egui::RichText::new("Text selection unavailable").color(theme::color(theme::TEXT_MUTED))).on_hover_text(error);}
 
                 let available = ui.available_size();
@@ -2170,6 +2179,7 @@ fn draw_canvas_backdrop(painter: &egui::Painter, rect: egui::Rect) {
     );
 }
 
+#[cfg(test)]
 fn tool_chip_button(label: &str) -> egui::Button<'static> {
     egui::Button::new(
         egui::RichText::new(label)
@@ -2183,40 +2193,9 @@ fn tool_chip_button(label: &str) -> egui::Button<'static> {
     .min_size(egui::vec2(36.0, 26.0))
 }
 
+#[cfg(test)]
 fn tool_chip(ui: &mut egui::Ui, label: &str) -> egui::Response {
     ui.add(tool_chip_button(label))
-}
-
-fn sidebar_toggle_button(ui: &mut egui::Ui, label: &str, tooltip: &str) -> egui::Response {
-    ui.add(
-        egui::Button::new(
-            egui::RichText::new(label)
-                .strong()
-                .color(theme::color(theme::ACCENT))
-                .size(14.0),
-        )
-        .fill(theme::color(theme::CONTROL))
-        .stroke(egui::Stroke::new(1.0, theme::color(theme::STROKE)))
-        .corner_radius(egui::CornerRadius::same(4))
-        .min_size(egui::vec2(28.0, 26.0)),
-    )
-    .on_hover_text(tooltip)
-}
-
-fn sidebar_wide_toggle_button(ui: &mut egui::Ui, label: &str, tooltip: &str) -> egui::Response {
-    ui.add(
-        egui::Button::new(
-            egui::RichText::new(label)
-                .monospace()
-                .strong()
-                .color(theme::color(theme::ACCENT)),
-        )
-        .fill(theme::color(theme::CONTROL))
-        .stroke(egui::Stroke::new(1.0, theme::color(theme::STROKE)))
-        .corner_radius(egui::CornerRadius::same(4))
-        .min_size(egui::vec2(ui.available_width(), 28.0)),
-    )
-    .on_hover_text(tooltip)
 }
 
 fn metric_pill(ui: &mut egui::Ui, label: &str) {
@@ -2224,7 +2203,7 @@ fn metric_pill(ui: &mut egui::Ui, label: &str) {
         .fill(theme::color(theme::PANEL_RAISED))
         .stroke(egui::Stroke::new(1.0, theme::color(theme::STROKE)))
         .corner_radius(egui::CornerRadius::same(4))
-        .inner_margin(egui::Margin::symmetric(10, 5))
+        .inner_margin(egui::Margin::symmetric(6, 2))
         .show(ui, |ui| {
             ui.label(
                 egui::RichText::new(label)
@@ -2232,34 +2211,6 @@ fn metric_pill(ui: &mut egui::Ui, label: &str) {
                     .color(theme::color(theme::TEXT_MUTED)),
             );
         });
-}
-
-fn nav_tab_button(ui: &mut egui::Ui, label: &str, selected: bool) -> egui::Response {
-    let fill = if selected {
-        theme::color(theme::ACCENT_SOFT)
-    } else {
-        theme::color(theme::PANEL_RAISED)
-    };
-    let text = if selected {
-        theme::color(theme::ACCENT_STRONG)
-    } else {
-        theme::color(theme::TEXT_MUTED)
-    };
-    ui.add(
-        egui::Button::new(egui::RichText::new(label).strong().color(text).size(12.0))
-            .selected(selected)
-            .fill(fill)
-            .stroke(egui::Stroke::new(
-                1.0,
-                if selected {
-                    theme::color(theme::ACCENT)
-                } else {
-                    theme::color(theme::STROKE)
-                },
-            ))
-            .corner_radius(egui::CornerRadius::same(4))
-            .min_size(egui::vec2((ui.available_width() - 6.0) / 2.0, 30.0)),
-    )
 }
 
 fn section_header(ui: &mut egui::Ui, label: &str) {

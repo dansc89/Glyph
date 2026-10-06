@@ -98,7 +98,7 @@ def main():
                 time.sleep(.05)
         raise AssertionError('no owned native window')
 
-    region=(350,220,1190,750)
+    region=(350,90,1190,770)
     def red(name,area=region):
         image=Image.open(shot(name)).convert('RGB').crop(area)
         return sum(1 for p in image_pixels(image) if isinstance(p,tuple) and p[0]>180 and p[1]<75 and p[2]<90)
@@ -173,7 +173,7 @@ def main():
         key('ctrl+z');check('Undo restores deleted rectangle',wait_red('05-delete-undo',True)>60)
         # A selection on page 1 must not permit deleting its invisible annotation from page 2.
         key('v');x,y=point(box,.4,.4);run('xdotool','mousemove',str(x),str(y),'click','1')
-        run('xdotool','mousemove','120','188','click','1')
+        key('ctrl+g');key('ctrl+a');run('xdotool','type','--clearmodifiers','2');key('Return')
         deadline=time.monotonic()+10;green=0
         while time.monotonic()<deadline:
             image=Image.open(shot('05-other-page')).convert('RGB').crop(region)
@@ -182,7 +182,7 @@ def main():
             time.sleep(.05)
         check('navigation displays the second green drawing',green>1000)
         key('Delete');time.sleep(.3)
-        run('xdotool','mousemove','50','188','click','1')
+        key('ctrl+g');key('ctrl+a');run('xdotool','type','--clearmodifiers','1');key('Return')
         check('Delete on another page does not remove the invisible rectangle',wait_red('05-other-page-delete-safe',True)>60)
         check('history and deletion do not write original PDF',pdf.read_bytes()==original)
         key('ctrl+s');deadline=time.monotonic()+10

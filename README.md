@@ -13,6 +13,10 @@ Glyph is **not** a web wrapper. It is a native Rust desktop app.
 - Rendering path: PDFium via `pdfium-bundled`, embedded at build time so the app does not need a system PDFium install
 - Development: native Rust builds/tests on an x86_64 Linux desktop; GitHub Actions produces Linux release artifacts
 
+## Compact PDF-first UI
+
+Release 1.4 uses a single compact icon toolbar, narrower sidebar and smaller title/status bars. Infrequent automation actions are in the More menu, with tooltips and keyboard shortcuts retained. See [`docs/releases/1.4.md`](docs/releases/1.4.md) for verification and limits.
+
 ## Viewer features
 
 - Load a PDF by file picker, pasted path, drag-and-drop, or CLI argument (`glyph file.pdf`)
@@ -29,7 +33,7 @@ Glyph is **not** a web wrapper. It is a native Rust desktop app.
 Easiest path today:
 
 ```bash
-curl -fsSL https://github.com/dansc89/Glyph/releases/download/1.3/install-glyph-arch.sh | sh
+curl -fsSL https://github.com/dansc89/Glyph/releases/download/1.4/install-glyph-arch.sh | sh
 glyph
 ```
 
