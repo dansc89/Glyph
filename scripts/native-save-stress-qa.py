@@ -14,7 +14,8 @@ from pathlib import Path
 
 from PIL import Image
 from pypdf import PdfReader, PdfWriter
-from pypdf.generic import ArrayObject, DictionaryObject, NameObject, NumberObject
+from pypdf.annotations import Link
+from pypdf.generic import ArrayObject, NameObject, NumberObject
 
 
 def load_isolation():
@@ -84,9 +85,9 @@ def main():
         page[NameObject('/Rotate')] = NumberObject(seed.pages[0].rotation)
         page.pop('/CropBox', None)
     writer._pages.get_object()[NameObject('/CropBox')] = ArrayObject([NumberObject(v) for v in seed.pages[0].cropbox])
-    link = DictionaryObject({NameObject('/Type'): NameObject('/Annot'), NameObject('/Subtype'): NameObject('/Link'),
-                            NameObject('/Rect'): ArrayObject([NumberObject(v) for v in (30, 30, 90, 50)]),
-                            NameObject('/Dest'): ArrayObject([writer.pages[0].indirect_reference, NameObject('/Fit')])})
+    # Use pypdf's public builder: older add_annotation expects its structured
+    # internal-destination representation, not a raw PDF /Dest array.
+    link = Link(rect=(30, 30, 90, 50), target_page_index=0)
     writer.add_annotation(99, link)
     writer.add_outline_item('Stress sheet 001', 0)
     pdf = out / 'synthetic-100-page.pdf'
