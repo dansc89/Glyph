@@ -15,6 +15,29 @@ pub(super) struct EditingState {
     error: Option<String>,
     preview_error: Option<String>,
     deferred_save: Option<DeferredSave>,
+    saved_preview: Option<SavedPreview>,
+}
+struct SavedPreview {
+    generation: u64,
+    path: PathBuf,
+    started: Instant,
+}
+#[derive(Clone, Copy)]
+enum EditKind {
+    Edit,
+    Save,
+    SaveAs,
+    LoadMarkups,
+}
+impl EditKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Edit => "Editing document…",
+            Self::Save => "Saving PDF…",
+            Self::SaveAs => "Saving PDF copy…",
+            Self::LoadMarkups => "Loading markups…",
+        }
+    }
 }
 struct DeferredSave {
     generation: u64,
@@ -22,6 +45,8 @@ struct DeferredSave {
     command: Command,
 }
 struct PendingEdit {
+    kind: EditKind,
+    started: Instant,
     generation: u64,
     path: PathBuf,
     receiver: mpsc::Receiver<EditCompletion>,
@@ -117,6 +142,7 @@ impl GlyphApp {
     }
     pub(super) fn can_change_markups(&self) -> bool {
         self.project.document.is_some()
+            && !self.render_worker_failed()
             && !self.markup.preview_pending
             && self.editing.preview_error.is_none()
             && self.loading_document.is_none()
@@ -155,17 +181,71 @@ impl GlyphApp {
             .or(self.editing.preview_error.as_deref())
     }
     pub(super) fn preview_failed(&mut self, error: impl std::fmt::Display) {
+        let saved = self
+            .editing
+            .saved_preview
+            .as_ref()
+            .is_some_and(|marker| self.editing_progress_owned(marker.generation, &marker.path));
+        self.editing.saved_preview = None;
         self.markup.preview_pending = false;
         self.cancel_markup_selection();
-        self.editing.preview_error = Some(format!(
-            "Document changes retained but preview unavailable: {error}. Retry preview, Undo, Save, or Save As to recover."
-        ));
+        let evidence = if saved {
+            "Saved PDF — verified and committed, but preview unavailable"
+        } else {
+            "Document changes retained but preview unavailable"
+        };
+        let recovery = if self.render_worker_failed() {
+            "Save or Save As if needed, then restart Glyph to restore previews."
+        } else {
+            "Retry preview, Undo, Save, or Save As to recover."
+        };
+        self.editing.preview_error = Some(format!("{evidence}: {error}. {recovery}"));
         self.status = self.editing.preview_error.clone().unwrap();
     }
     pub(super) fn preview_ready(&mut self) {
+        // Called only when the current page's validated pixels are installed.
+        // A failed replacement can advance generation while keeping this PDF;
+        // its stale progress token must not keep the current preview gated.
+        self.editing.saved_preview = None;
         if self.markup.preview_pending {
             self.markup.preview_pending = false;
             self.editing.preview_error = None;
+        }
+    }
+    fn editing_progress_owned(&self, generation: u64, path: &Path) -> bool {
+        generation == self.document_generation
+            && self.loading_document.is_none()
+            && self
+                .project
+                .document
+                .as_ref()
+                .is_some_and(|d| d.path == path)
+    }
+    pub(super) fn editing_progress_status(&self, now: Instant) -> Option<String> {
+        if self.persistent_edit_error().is_some() {
+            return None;
+        }
+        let (label, started) = if let Some(pending) = &self.editing.pending {
+            if !self.editing_progress_owned(pending.generation, &pending.path) {
+                return None;
+            }
+            (pending.kind.label(), pending.started)
+        } else if let Some(marker) = &self.editing.saved_preview {
+            if !self.editing_progress_owned(marker.generation, &marker.path) {
+                return None;
+            }
+            ("Saved PDF — refreshing preview…", marker.started)
+        } else {
+            return None;
+        };
+        let elapsed = now.checked_duration_since(started).unwrap_or_default();
+        if elapsed >= Duration::from_secs(10) {
+            Some(format!(
+                "{label} {}s elapsed — still working; no confirmed completion of this operation; not automatically cancelled.",
+                elapsed.as_secs()
+            ))
+        } else {
+            Some(label.into())
         }
     }
     pub(super) fn preview_unavailable(&self) -> bool {
@@ -737,6 +817,10 @@ impl GlyphApp {
         ctx: &egui::Context,
         serialize: impl FnOnce(&EditablePdf) -> Result<Vec<u8>, PdfError> + Send + 'static,
     ) {
+        if self.render_worker_failed() && !matches!(&command, Command::Save | Command::SaveAs(_)) {
+            self.status = RENDER_WORKER_FAILURE.into();
+            return;
+        }
         if self.preview_unavailable()
             && matches!(
                 &command,
@@ -803,12 +887,27 @@ impl GlyphApp {
         }
         let mut session = self.editing.session.take();
         let (sender, receiver) = mpsc::sync_channel(1);
+        let kind = match &command {
+            Command::Save => EditKind::Save,
+            Command::SaveAs(_) => EditKind::SaveAs,
+            Command::LoadMarkups => EditKind::LoadMarkups,
+            _ => EditKind::Edit,
+        };
+        self.editing.saved_preview = None;
         self.editing.pending = Some(PendingEdit {
+            kind,
+            started: Instant::now(),
             generation,
             path: path.clone(),
             receiver,
         });
-        self.status = "Editing document…".into();
+        self.status = match &command {
+            Command::Save => "Saving PDF…",
+            Command::SaveAs(_) => "Saving PDF copy…",
+            Command::LoadMarkups => "Loading markups…",
+            _ => "Editing document…",
+        }
+        .into();
         let ctx = ctx.clone();
         let retry_preview = self.preview_unavailable();
         thread::spawn(move || {
@@ -916,7 +1015,13 @@ impl GlyphApp {
                 return;
             }
             Err(mpsc::TryRecvError::Disconnected) => {
+                let owned = self.editing_progress_owned(pending.generation, &pending.path);
                 self.editing.pending = None;
+                if !owned {
+                    return;
+                }
+                self.editing.saved_preview = None;
+                self.markup.preview_pending = false;
                 self.editing.unrecoverable = true;
                 self.editing.error=Some("Document worker failed. The editing snapshot cannot be recovered; saving is blocked. Discard and reopen the PDF to continue.".into());
                 self.status = self.editing.error.clone().unwrap();
@@ -974,6 +1079,12 @@ impl GlyphApp {
                 self.editing.saved_pages = Some(document.summary.pages.clone());
             }
             self.document_generation = self.document_generation.wrapping_add(1).max(1);
+            self.editing.saved_preview =
+                self.project.document.as_ref().map(|document| SavedPreview {
+                    generation: self.document_generation,
+                    path: document.path.clone(),
+                    started: Instant::now(),
+                });
             self.render_worker.reset(self.document_generation);
             self.page_cache.clear();
             self.page_texture_cache.clear();
@@ -1043,6 +1154,9 @@ impl GlyphApp {
         if let Some(error) = outcome.preview_error {
             self.preview_failed(error);
         }
+        if self.render_worker_failed() && self.markup.preview_pending {
+            self.preview_failed(RENDER_WORKER_FAILURE);
+        }
         if outcome.saved && self.editing.save_before_transition {
             self.editing.save_before_transition = false;
             if let Some(transition) = self.editing.transition.take() {
@@ -1067,6 +1181,10 @@ impl GlyphApp {
         false
     }
 }
+
+#[cfg(test)]
+#[path = "operation_ui_tests.rs"]
+mod operation_ui_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1637,6 +1755,229 @@ mod tests {
         settle(&mut app, &ctx);
         assert!(!app.editing.dirty && app.markup.items.len() == 1);
     }
+    #[test]
+    fn saving_owned_edits_after_renderer_death_commits_without_false_preview_spinner() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dead-renderer-save.pdf");
+        fixture(&path);
+        let ctx = egui::Context::default();
+        let mut app = setup(&path, &ctx);
+        let mut session = EditablePdf::open(&path).unwrap();
+        session
+            .rename_bookmark(0, "Saved despite renderer death")
+            .unwrap();
+        app.editing.session = Some(session);
+        app.editing.dirty = true;
+        let (tx, rx) = mpsc::channel();
+        app.render_result_rx = rx;
+        drop(tx);
+        app.apply_render_results(&ctx);
+        app.start_edit(Command::Save, &ctx);
+        assert!(
+            app.edit_pending(),
+            "saving must remain available for owned changes"
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while app.edit_pending() && Instant::now() < deadline {
+            app.apply_edit_results(&ctx);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(!app.edit_pending() && !app.editing.dirty);
+        assert_eq!(
+            EditablePdf::open(&path).unwrap().bookmarks()[0].title,
+            "Saved despite renderer death"
+        );
+        assert!(app.editing.session.is_some() && !app.editing.unrecoverable);
+        assert!(
+            !app.markup.preview_pending,
+            "dead renderer cannot refresh; do not spin forever"
+        );
+        assert!(app.editing_progress_status(Instant::now()).is_none());
+        assert!(app.persistent_edit_error().unwrap().contains("Saved PDF"));
+    }
+
+    #[test]
+    fn progress_start_save_has_operation_label() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("progress.pdf");
+        fixture(&path);
+        let ctx = egui::Context::default();
+        let mut app = setup(&path, &ctx);
+        let mut session = EditablePdf::open(&path).unwrap();
+        session.rename_bookmark(0, "Changed").unwrap();
+        app.editing.session = Some(session);
+        app.editing.dirty = true;
+        app.start_edit(Command::Save, &ctx);
+        assert_eq!(app.status, "Saving PDF…");
+    }
+
+    #[test]
+    fn progress_warning_and_verified_save_preview_are_owned() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("progress.pdf");
+        let copy = dir.path().join("copy.pdf");
+        fixture(&path);
+        let ctx = egui::Context::default();
+        let mut app = setup(&path, &ctx);
+        let mut session = EditablePdf::open(&path).unwrap();
+        session.rename_bookmark(0, "Changed").unwrap();
+        app.editing.dirty = true;
+        // Hold completion under test control: no sleep and no synthetic backend result.
+        let (sender, receiver) = mpsc::sync_channel(1);
+        app.editing.pending = Some(PendingEdit {
+            kind: EditKind::Edit,
+            started: Instant::now(),
+            generation: app.document_generation,
+            path: path.clone(),
+            receiver,
+        });
+        let now = Instant::now();
+        assert_eq!(
+            app.editing_progress_status(now).as_deref(),
+            Some("Editing document…")
+        );
+        let warning = app
+            .editing_progress_status(now + Duration::from_secs(11))
+            .unwrap();
+        assert!(
+            warning.contains("still working")
+                && warning.contains("no confirmed completion")
+                && warning.contains("not automatically cancelled"),
+            "{warning}"
+        );
+        app.apply_edit_results(&ctx);
+        assert!(app.editing.pending.is_some() && app.editing.dirty && !app.can_change_markups());
+        session.save_as(&copy).unwrap();
+        sender
+            .send(EditCompletion {
+                dirty: session.is_dirty(),
+                bookmarks: session.bookmarks(),
+                page_labels: session.page_labels(),
+                shapes: session.shapes(),
+                session: Some(session),
+                result: Ok(true),
+                saved: true,
+                snapshot: None,
+                preview_error: None,
+            })
+            .unwrap();
+        app.apply_edit_results(&ctx);
+        assert!(!app.editing.dirty);
+        assert_eq!(app.project.document.as_ref().unwrap().path, copy);
+        app.status = "Rendered / search finished".into();
+        assert_eq!(
+            app.editing_progress_status(Instant::now()).as_deref(),
+            Some("Saved PDF — refreshing preview…")
+        );
+        let generation = app.document_generation;
+        app.document_generation += 1;
+        assert!(app.editing_progress_status(Instant::now()).is_none());
+        app.document_generation = generation;
+        assert!(
+            app.editing_progress_status(Instant::now()).is_some(),
+            "stale progress is hidden, not mistaken for completed current pixels"
+        );
+        app.preview_failed("test render failure");
+        assert!(app.editing_progress_status(Instant::now()).is_none());
+        assert!(app.persistent_edit_error().unwrap().contains("Saved PDF"));
+        assert!(!app.markup.preview_pending);
+    }
+
+    #[test]
+    fn progress_disconnect_clears_spinner_and_keeps_unrecoverable_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("progress.pdf");
+        fixture(&path);
+        let ctx = egui::Context::default();
+        let mut app = setup(&path, &ctx);
+        let (sender, receiver) = mpsc::channel();
+        app.editing.pending = Some(PendingEdit {
+            kind: EditKind::Save,
+            started: Instant::now(),
+            generation: app.document_generation,
+            path: path.clone(),
+            receiver,
+        });
+        app.markup.preview_pending = true;
+        drop(sender);
+        app.apply_edit_results(&ctx);
+        assert!(!app.markup.preview_pending);
+        assert!(app.editing.unrecoverable && app.editing.pending.is_none());
+        assert!(app.editing_progress_status(Instant::now()).is_none());
+        assert!(
+            app.persistent_edit_error()
+                .unwrap()
+                .contains("saving is blocked")
+        );
+    }
+
+    #[test]
+    fn progress_clock_labels_precedence_and_ready_reset() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("progress.pdf");
+        fixture(&path);
+        let ctx = egui::Context::default();
+        let mut app = setup(&path, &ctx);
+        let now = Instant::now();
+        for kind in [
+            EditKind::Save,
+            EditKind::SaveAs,
+            EditKind::Edit,
+            EditKind::LoadMarkups,
+        ] {
+            let (_sender, receiver) = mpsc::channel();
+            app.editing.pending = Some(PendingEdit {
+                kind,
+                started: now,
+                generation: app.document_generation,
+                path: path.clone(),
+                receiver,
+            });
+            assert_eq!(
+                app.editing_progress_status(now - Duration::from_secs(1))
+                    .as_deref(),
+                Some(kind.label())
+            );
+            assert_eq!(
+                app.editing_progress_status(now + Duration::from_secs(9))
+                    .as_deref(),
+                Some(kind.label())
+            );
+            assert!(
+                app.editing_progress_status(now + Duration::from_secs(10))
+                    .unwrap()
+                    .contains("still working")
+            );
+            app.editing.error = Some("Persistent failure".into());
+            assert!(app.editing_progress_status(now).is_none());
+            app.editing.error = None;
+        }
+        app.editing.pending = None;
+        app.markup.preview_pending = true;
+        app.preview_ready();
+        assert!(
+            app.editing_progress_status(now).is_none(),
+            "normal edits must not claim saved"
+        );
+        app.editing.saved_preview = Some(SavedPreview {
+            generation: app.document_generation,
+            path: path.clone(),
+            started: now,
+        });
+        app.markup.preview_pending = true;
+        app.project.document.as_mut().unwrap().path = dir.path().join("other.pdf");
+        app.preview_ready();
+        assert!(
+            !app.markup.preview_pending && app.editing.saved_preview.is_none(),
+            "validated current installation releases stale progress tokens"
+        );
+        app.project.document.as_mut().unwrap().path = path;
+        app.preview_ready();
+        assert!(!app.markup.preview_pending && app.editing.saved_preview.is_none());
+        app.editing = EditingState::default();
+        assert!(app.editing_progress_status(now).is_none());
+    }
+
     fn pointer(pos: egui::Pos2, pressed: bool) -> egui::Event {
         egui::Event::PointerButton {
             pos,
@@ -2816,6 +3157,8 @@ mod tests {
         let mut app = GlyphApp::with_context(&ctx, None);
         let (_sender, receiver) = mpsc::channel();
         app.editing.pending = Some(PendingEdit {
+            kind: EditKind::Edit,
+            started: Instant::now(),
             generation: 1,
             path: PathBuf::from("not-opened.pdf"),
             receiver,
@@ -3092,6 +3435,8 @@ mod tests {
         let (sender, receiver) = mpsc::channel();
         drop(sender);
         app.editing.pending = Some(PendingEdit {
+            kind: EditKind::Edit,
+            started: Instant::now(),
             generation: app.document_generation,
             path: path.clone(),
             receiver,
@@ -3142,6 +3487,8 @@ mod tests {
             })
             .unwrap();
         app.editing.pending = Some(PendingEdit {
+            kind: EditKind::Edit,
+            started: Instant::now(),
             generation: app.document_generation,
             path,
             receiver,
@@ -4026,6 +4373,8 @@ mod tests {
         app.project.open_document("current.pdf".into(), summary());
         let (_tx, receiver) = mpsc::sync_channel(1);
         app.editing.pending = Some(PendingEdit {
+            kind: EditKind::Edit,
+            started: Instant::now(),
             generation: app.document_generation,
             path: "current.pdf".into(),
             receiver,

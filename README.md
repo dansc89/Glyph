@@ -15,7 +15,7 @@ Glyph is **not** a web wrapper. It is a native Rust desktop app.
 
 ## Compact PDF-first UI
 
-Release 1.4 uses a single compact icon toolbar, narrower sidebar and smaller title/status bars. Infrequent automation actions are in the More menu, with tooltips and keyboard shortcuts retained. See [`docs/releases/1.4.md`](docs/releases/1.4.md) for verification and limits.
+Release 1.5 adds explicit loading and save-stage feedback, renderer-failure recovery guards, reusable high-zoom pan tiles, and whole-word double-click selection. The compact PDF-first interface remains. See [`docs/releases/1.5.md`](docs/releases/1.5.md) for verification and limits.
 
 ## Viewer features
 
@@ -33,7 +33,7 @@ Release 1.4 uses a single compact icon toolbar, narrower sidebar and smaller tit
 Easiest path today:
 
 ```bash
-curl -fsSL https://github.com/dansc89/Glyph/releases/download/1.4/install-glyph-arch.sh | sh
+curl -fsSL https://github.com/dansc89/Glyph/releases/download/1.5/install-glyph-arch.sh | sh
 glyph
 ```
 

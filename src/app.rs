@@ -3,13 +3,19 @@ mod automation;
 mod compact_tests;
 mod editing;
 mod icons;
+#[cfg(test)]
+mod loading_tests;
 mod markup;
+#[cfg(test)]
+mod render_failure_tests;
 mod render_worker;
 #[cfg(test)]
 mod shortcut_tests;
 mod text_selection;
 mod text_view;
 mod thumbnails;
+#[cfg(test)]
+mod tile_reuse_tests;
 use crate::core::navigation::NavigationHistory;
 use crate::core::project::ProjectState;
 use crate::pdf::PdfInternalLink;
@@ -31,6 +37,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const BASE_RENDER_WIDTH: u16 = 1800;
+const RENDER_WORKER_FAILURE: &str = "Renderer stopped — PDF and document changes retained. Save or Save As if needed, then restart Glyph to restore previews. Opening PDFs and preview retry are unavailable until restart.";
 const MAX_RENDER_WIDTH: u16 = 8192;
 const RERENDER_UPSCALE_THRESHOLD: f32 = 1.15;
 const VIEW_RERENDER_IDLE: Duration = Duration::from_millis(320);
@@ -124,6 +131,7 @@ pub struct GlyphApp {
     selection: text_selection::TextSelection,
     selecting_text: bool,
     render_worker: RenderWorker,
+    render_worker_dead: bool,
     document_generation: u64,
     render_result_rx: mpsc::Receiver<RenderJobResult>,
     next_render_job_id: u64,
@@ -212,6 +220,10 @@ enum RenderJobResult {
 }
 
 impl GlyphApp {
+    pub(super) fn render_worker_failed(&self) -> bool {
+        self.render_worker_dead
+    }
+
     pub fn new(cc: &eframe::CreationContext<'_>, initial_pdf: Option<PathBuf>) -> Self {
         Self::with_context(&cc.egui_ctx, initial_pdf)
     }
@@ -271,6 +283,7 @@ impl GlyphApp {
             selection: text_selection::TextSelection::default(),
             selecting_text: false,
             render_worker,
+            render_worker_dead: false,
             document_generation: 0,
             render_result_rx,
             next_render_job_id: 1,
@@ -295,6 +308,10 @@ impl GlyphApp {
     }
 
     fn open_pdf(&mut self, path: PathBuf, _ctx: &egui::Context) {
+        if self.render_worker_failed() {
+            self.status = RENDER_WORKER_FAILURE.to_owned();
+            return;
+        }
         if self.defer_document_open(path.clone()) {
             _ctx.request_repaint();
             return;
@@ -379,6 +396,9 @@ impl GlyphApp {
     }
 
     fn render_selected_page(&mut self, ctx: &egui::Context, target_width: u16) {
+        if self.render_worker_failed() {
+            return;
+        }
         let Some(document) = &self.project.document else {
             return;
         };
@@ -401,6 +421,9 @@ impl GlyphApp {
     }
 
     fn queue_page_render(&mut self, path: PathBuf, page_index: usize, target_width: u16) {
+        if self.render_worker_failed() {
+            return;
+        }
         if self.pending_page_render.as_ref().is_some_and(|pending| {
             pending.path == path
                 && pending.page_index == page_index
@@ -471,6 +494,9 @@ impl GlyphApp {
     }
 
     fn queue_adjacent_page_prefetch(&mut self) {
+        if self.render_worker_failed() {
+            return;
+        }
         let Some(document) = &self.project.document else {
             return;
         };
@@ -547,7 +573,24 @@ impl GlyphApp {
     }
 
     fn apply_render_results(&mut self, ctx: &egui::Context) {
-        while let Ok(result) = self.render_result_rx.try_recv() {
+        loop {
+            let result = match self.render_result_rx.try_recv() {
+                Ok(result) => result,
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.render_worker_dead = true;
+                    self.loading_document = None;
+                    self.pending_page_render = None;
+                    self.pending_tile_render = None;
+                    self.pending_prefetch_pages.clear();
+                    self.pending_links = None;
+                    self.pending_text = None;
+                    self.thumbnails = thumbnails::ThumbnailState::default();
+                    self.markup.preview_pending = false;
+                    self.status = RENDER_WORKER_FAILURE.to_owned();
+                    break;
+                }
+            };
             match result {
                 RenderJobResult::Text {
                     id,
@@ -769,7 +812,7 @@ impl GlyphApp {
     }
 
     fn select_page(&mut self, page_index: usize, ctx: &egui::Context) {
-        if self.loading_document.is_some() {
+        if self.render_worker_failed() || self.loading_document.is_some() {
             return;
         }
         if let Some(count) = self.page_count() {
@@ -784,7 +827,7 @@ impl GlyphApp {
     }
 
     fn select_page_without_history(&mut self, page_index: usize, ctx: &egui::Context) {
-        if self.loading_document.is_some() {
+        if self.render_worker_failed() || self.loading_document.is_some() {
             return;
         }
         let Some(page_count) = self.page_count() else {
@@ -862,7 +905,7 @@ impl GlyphApp {
     }
 
     fn ensure_render_quality(&mut self, ctx: &egui::Context) {
-        if self.loading_document.is_some() {
+        if self.render_worker_failed() || self.loading_document.is_some() {
             return;
         }
         // At high zoom only the visible tile needs high resolution, not the full drawing.
@@ -906,7 +949,7 @@ impl GlyphApp {
         viewport: egui::Rect,
         page_rect: egui::Rect,
     ) {
-        if self.loading_document.is_some() {
+        if self.render_worker_failed() || self.loading_document.is_some() {
             return;
         }
         if self.zoom < TILE_RENDER_TRIGGER_ZOOM {
@@ -934,11 +977,16 @@ impl GlyphApp {
         ) else {
             return;
         };
-        if self
-            .rendered_tile
-            .as_ref()
-            .is_some_and(|tile| tile.contains(&request))
-        {
+        if self.rendered_tile.as_ref().is_some_and(|tile| {
+            // Padding is for future pans, not a requirement for current coverage.
+            // Keep the raster identity guard so zoom/HiDPI changes still rerender.
+            tile.contains(&request)
+                || (tile.page_index == request.page_index
+                    && tile.full_width == request.full_width
+                    && tile.full_height == request.full_height
+                    && tile_screen_rect(tile, page_rect)
+                        .contains_rect(viewport.intersect(page_rect)))
+        }) {
             return;
         }
 
@@ -1346,6 +1394,9 @@ impl GlyphApp {
     }
 
     fn queue_page_links(&mut self, _ctx: &egui::Context) {
+        if self.render_worker_failed() {
+            return;
+        }
         let Some(document) = &self.project.document else {
             return;
         };
@@ -1431,7 +1482,7 @@ impl GlyphApp {
     }
 
     fn go_back(&mut self, ctx: &egui::Context) {
-        if self.loading_document.is_some() {
+        if self.render_worker_failed() || self.loading_document.is_some() {
             return;
         }
         if let Some(view) = self.navigation_history.back(self.view_location()) {
@@ -1439,7 +1490,7 @@ impl GlyphApp {
         }
     }
     fn go_forward(&mut self, ctx: &egui::Context) {
-        if self.loading_document.is_some() {
+        if self.render_worker_failed() || self.loading_document.is_some() {
             return;
         }
         if let Some(view) = self.navigation_history.forward(self.view_location()) {
@@ -1536,6 +1587,81 @@ impl GlyphApp {
 }
 
 impl GlyphApp {
+    fn draw_missing_page(&self, ui: &mut egui::Ui, rect: egui::Rect) {
+        let opening = self.loading_document.is_some();
+        let failed = self.render_worker_failed();
+        if !failed && !opening && self.project.document.is_none() {
+            draw_empty_state(ui, rect);
+            return;
+        }
+        let busy =
+            !failed && (opening || self.pending_page_render.is_some() || self.edit_pending());
+        let title = if failed {
+            "Renderer stopped".to_owned()
+        } else if opening {
+            "Opening PDF…".to_owned()
+        } else if busy {
+            format!(
+                "Loading page {} of {}…",
+                self.project.selected_page + 1,
+                self.page_count().unwrap_or(0)
+            )
+        } else {
+            "Page preview unavailable".to_owned()
+        };
+        let panel = egui::Rect::from_center_size(
+            rect.center(),
+            egui::vec2(rect.width().min(420.0), rect.height().min(150.0)),
+        );
+        let mut content = ui.new_child(
+            egui::UiBuilder::new()
+                .id_salt("missing_page")
+                .max_rect(panel)
+                .layout(egui::Layout::top_down(egui::Align::Center)),
+        );
+        content.set_clip_rect(rect.intersect(ui.clip_rect()));
+        let painter = content.painter();
+        painter.rect_filled(panel, 6.0, theme::color(theme::PANEL));
+        content.add_space(18.0);
+        if busy {
+            let (spinner, _) =
+                content.allocate_exact_size(egui::vec2(24.0, 24.0), egui::Sense::hover());
+            // A bounded animation cadence; no context access inside another context lock.
+            let phase = content.input(|input| input.time) as f32 * 4.0;
+            let points = (0..=24)
+                .map(|step| {
+                    let angle = phase + step as f32 / 24.0 * std::f32::consts::PI * 1.5;
+                    spinner.center() + egui::vec2(angle.cos(), angle.sin()) * 10.0
+                })
+                .collect();
+            content.painter().add(egui::Shape::line(
+                points,
+                egui::Stroke::new(2.5, theme::color(theme::ACCENT)),
+            ));
+            content
+                .ctx()
+                .request_repaint_after(std::time::Duration::from_millis(50));
+        }
+        content.add_space(8.0);
+        content.label(
+            egui::RichText::new(title)
+                .size(20.0)
+                .color(theme::color(theme::TEXT)),
+        );
+        let detail = if failed {
+            "Restart Glyph to restore previews. Save retained changes first if needed."
+        } else if opening {
+            "Reading your PDF. Preparing the first page."
+        } else if busy {
+            "Your PDF is still open. Preparing this page."
+        } else if self.preview_unavailable() {
+            "Your PDF is still open. See the error below for recovery options."
+        } else {
+            "Your PDF is still open. Retry the page preview."
+        };
+        content.label(egui::RichText::new(detail).color(theme::color(theme::TEXT_MUTED)));
+    }
+
     fn draw(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         theme::refresh(&ctx);
@@ -1719,7 +1845,13 @@ impl GlyphApp {
 
                             match self.navigation_tab {
                                 NavigationTab::Search => self.search_sidebar(ui, &ctx),
-                                NavigationTab::Pages => self.thumbnail_sidebar(ui),
+                                NavigationTab::Pages => {
+                                    if self.render_worker_failed() {
+                                        empty_sidebar_note(ui, "Renderer stopped. Restart Glyph to restore page previews.");
+                                    } else {
+                                        self.thumbnail_sidebar(ui);
+                                    }
+                                }
                                 NavigationTab::Bookmarks => {
                                     if bookmark_rows == 0 {
                                         empty_sidebar_note(ui, "No bookmarks in this PDF.");
@@ -1794,8 +1926,11 @@ impl GlyphApp {
             )
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    let error = self.persistent_edit_error();
-                    let status = error.unwrap_or(&self.status);
+                    let error = self
+                        .persistent_edit_error()
+                        .or_else(|| self.render_worker_failed().then_some(RENDER_WORKER_FAILURE));
+                    let progress = self.editing_progress_status(Instant::now());
+                    let status = error.or(progress.as_deref()).unwrap_or(&self.status);
                     let width = (ui.available_width() - 28.).max(0.);
                     ui.add_sized(
                         [width, 24.],
@@ -1993,7 +2128,7 @@ impl GlyphApp {
                         egui::StrokeKind::Inside,
                     );
                 } else {
-                    draw_empty_state(ui, rect);
+                    self.draw_missing_page(ui, rect);
                 }
             });
         // Canvas release must commit before a same-frame Save starts a worker.

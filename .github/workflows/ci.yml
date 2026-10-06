@@ -37,6 +37,10 @@ jobs:
         run: python3 scripts/markup-qa.py --binary target/release/glyph --shape ellipse --repeat-save --read-only-retry --imported-reals --out dist/markup-qa
       - name: Isolated synthetic 100-page native save stress
         run: python3 scripts/native-save-stress-qa.py --binary target/release/glyph --seed-pdf dist/markup-qa/mixed-shapes-proof.pdf --out dist/save-stress-qa
+      - name: Loading-state regression
+        run: python3 scripts/loading-state-qa.py --binary target/release/glyph --out dist/loading-qa
+      - name: Whole-word double-click regression
+        run: python3 scripts/audit-word-selection-qa.py --binary target/release/glyph --out dist/word-selection-qa
       - name: Display isolation checks
         run: python3 scripts/test-editing-qa-isolation.py
       - uses: actions/upload-artifact@v4
@@ -50,6 +54,8 @@ jobs:
             dist/viewer-qa/
             dist/markup-qa/
             dist/save-stress-qa/
+            dist/loading-qa/
+            dist/word-selection-qa/
       - name: Check portable runtime deps
         run: |
           mkdir -p dist

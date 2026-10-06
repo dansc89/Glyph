@@ -70,6 +70,19 @@ impl GlyphApp {
                 self.selecting_text = false;
             }
         }
+        // Double clicks are recognized on release by the response that owns
+        // the gesture. Expand after drag handling so it cannot collapse the word.
+        if response.double_clicked_by(egui::PointerButton::Primary)
+            && let Some(pointer) = response.interact_pointer_pos()
+            && page_rect.contains(pointer)
+            && !self
+                .page_links
+                .iter()
+                .any(|link| overlay_screen_rect(link.rect, page_rect).contains(pointer))
+        {
+            self.selection.select_word(text, normalized(pointer));
+            self.selecting_text = false;
+        }
         if response.hovered()
             && response.hover_pos().is_some_and(|p| {
                 text.glyphs
@@ -188,6 +201,130 @@ impl GlyphApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn word_fixture(ctx: &egui::Context) -> GlyphApp {
+        let mut app = GlyphApp::with_context(ctx, None);
+        app.zoom = 100. / BASE_RENDER_WIDTH as f32;
+        app.pan = egui::vec2(12., 8.);
+        app.rendered_page = Some(Arc::new(RenderedPage {
+            page_index: 0,
+            width: 2,
+            height: 2,
+            rgba: vec![255; 16],
+        }));
+        app.page_text = Some(Arc::new(crate::pdf::PageText {
+            page_index: 0,
+            glyphs: "CENTERLINE"
+                .chars()
+                .enumerate()
+                .map(|(i, c)| crate::pdf::TextGlyph {
+                    text: c.to_string(),
+                    rect: Some(crate::core::links::PdfRect {
+                        x: 0.1 + i as f32 * 0.07,
+                        y: 0.1,
+                        width: 0.06,
+                        height: 0.1,
+                    }),
+                })
+                .collect(),
+        }));
+        app
+    }
+
+    fn text_pointer_frame(
+        ctx: &egui::Context,
+        app: &mut GlyphApp,
+        time: f64,
+        events: Vec<egui::Event>,
+    ) -> (egui::Rect, egui::FullOutput, bool) {
+        let mut canvas = egui::Rect::NOTHING;
+        let mut double_clicked = false;
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                time: Some(time),
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                let (rect, response) =
+                    ui.allocate_exact_size(egui::vec2(200., 200.), egui::Sense::click_and_drag());
+                canvas = rect;
+                double_clicked = response.double_clicked_by(egui::PointerButton::Primary);
+                app.interact_with_page_text(ui, &response, rect);
+                app.copy_pdf_selection(ui.ctx());
+            },
+        );
+        output.textures_delta.clear();
+        (canvas, output, double_clicked)
+    }
+
+    fn primary_button(pos: egui::Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn single_click_copies_only_the_hit_glyph() {
+        let ctx = egui::Context::default();
+        let mut app = word_fixture(&ctx);
+        let (canvas, _, _) = text_pointer_frame(&ctx, &mut app, 0., vec![]);
+        let hit = canvas.center() + app.pan + egui::vec2(-33., -35.);
+        let (_, output, double) = text_pointer_frame(
+            &ctx,
+            &mut app,
+            0.1,
+            vec![
+                egui::Event::PointerMoved(hit),
+                primary_button(hit, true),
+                primary_button(hit, false),
+            ],
+        );
+        assert!(!double);
+        assert!(
+            output
+                .platform_output
+                .commands
+                .iter()
+                .any(|c| matches!(c, egui::OutputCommand::CopyText(s) if s == "E"))
+        );
+        assert!(!app.selecting_text);
+    }
+
+    #[test]
+    fn double_click_copies_the_whole_word_through_page_response() {
+        let ctx = egui::Context::default();
+        let mut app = word_fixture(&ctx);
+        let (canvas, _, _) = text_pointer_frame(&ctx, &mut app, 0., vec![]);
+        let hit = canvas.center() + app.pan + egui::vec2(-33., -35.);
+        text_pointer_frame(
+            &ctx,
+            &mut app,
+            0.1,
+            vec![egui::Event::PointerMoved(hit), primary_button(hit, true)],
+        );
+        text_pointer_frame(&ctx, &mut app, 0.15, vec![primary_button(hit, false)]);
+        text_pointer_frame(&ctx, &mut app, 0.2, vec![primary_button(hit, true)]);
+        let (_, output, double) =
+            text_pointer_frame(&ctx, &mut app, 0.25, vec![primary_button(hit, false)]);
+        assert!(
+            double,
+            "the actual canvas response must own a primary double click"
+        );
+        assert!(
+            output
+                .platform_output
+                .commands
+                .iter()
+                .any(|c| matches!(c, egui::OutputCommand::CopyText(s) if s == "CENTERLINE")),
+            "double click must copy CENTERLINE, not just the hit E; commands: {:?}",
+            output.platform_output.commands
+        );
+        assert!(!app.selecting_text);
+    }
+
     #[test]
     fn selection_handles_press_drag_and_release_batched_in_one_frame() {
         let ctx = egui::Context::default();
