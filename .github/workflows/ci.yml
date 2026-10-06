@@ -24,8 +24,9 @@ jobs:
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Reset Pdfium bundled cache
         run: rm -rf ~/.cache/pdfium-bundled
+      # Private drawing fixtures stay local; still run ignored portable benchmarks.
       - name: Test
-        run: cargo test --locked -- --include-ignored --test-threads=1
+        run: cargo test --locked -- --include-ignored --skip app::automation::tests::real_saltair_export_has_l1_11_bookmark_and_unchanged_rendering --skip pdf::automation::tests::real_saltair_rotated_titleblock_is_l1_11 --test-threads=1
       - name: Build release
         run: cargo build --locked --release
       - name: GUI smoke test
