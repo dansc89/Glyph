@@ -16,7 +16,7 @@ jobs:
       - name: Install Linux GUI/package deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config libssl-dev libx11-dev libxi-dev libgl1-mesa-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev desktop-file-utils fakeroot wget xvfb xdotool ffmpeg python3-pil tesseract-ocr xclip
+          sudo apt-get install -y build-essential pkg-config libssl-dev libx11-dev libxi-dev libgl1-mesa-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev desktop-file-utils fakeroot wget xvfb xdotool ffmpeg python3-pil tesseract-ocr xclip python3-pypdf
           cargo install cargo-deb --locked
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -25,13 +25,19 @@ jobs:
       - name: Reset Pdfium bundled cache
         run: rm -rf ~/.cache/pdfium-bundled
       - name: Test
-        run: cargo test --locked -- --test-threads=1
+        run: cargo test --locked -- --include-ignored --test-threads=1
       - name: Build release
         run: cargo build --locked --release
       - name: GUI smoke test
         run: python3 scripts/gui-qa.py --skip-build --out dist/gui-qa
       - name: Viewer regression checks
         run: python3 scripts/performance-qa.py --binary target/release/glyph --out dist/viewer-qa
+      - name: Isolated markup save/recovery regression
+        run: python3 scripts/markup-qa.py --binary target/release/glyph --shape ellipse --repeat-save --read-only-retry --imported-reals --out dist/markup-qa
+      - name: Isolated synthetic 100-page native save stress
+        run: python3 scripts/native-save-stress-qa.py --binary target/release/glyph --seed-pdf dist/markup-qa/mixed-shapes-proof.pdf --out dist/save-stress-qa
+      - name: Display isolation checks
+        run: python3 scripts/test-editing-qa-isolation.py
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -41,6 +47,8 @@ jobs:
             dist/gui-qa/*.txt
             dist/gui-qa/*.log
             dist/viewer-qa/
+            dist/markup-qa/
+            dist/save-stress-qa/
       - name: Check portable runtime deps
         run: |
           mkdir -p dist

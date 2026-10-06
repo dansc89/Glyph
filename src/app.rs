@@ -1,4 +1,6 @@
 mod automation;
+mod editing;
+mod markup;
 mod render_worker;
 #[cfg(test)]
 mod shortcut_tests;
@@ -74,6 +76,8 @@ pub struct GlyphApp {
     zoom: f32,
     pan: egui::Vec2,
     loading_document: Option<u64>,
+    editing: editing::EditingState,
+    markup: markup::MarkupState,
     automation_rx: Option<AutomationReceiver>,
     automation_feedback: Option<AutomationFeedback>,
     rendered_page: Option<Arc<RenderedPage>>,
@@ -219,6 +223,8 @@ impl GlyphApp {
             zoom: 1.0,
             pan: egui::Vec2::ZERO,
             loading_document: None,
+            editing: editing::EditingState::default(),
+            markup: markup::MarkupState::default(),
             automation_rx: None,
             automation_feedback: None,
             rendered_page: None,
@@ -286,6 +292,10 @@ impl GlyphApp {
     }
 
     fn open_pdf(&mut self, path: PathBuf, _ctx: &egui::Context) {
+        if self.defer_document_open(path.clone()) {
+            _ctx.request_repaint();
+            return;
+        }
         let id = self.next_render_job_id;
         self.next_render_job_id = self.next_render_job_id.wrapping_add(1).max(1);
         self.clear_page_text();
@@ -320,6 +330,8 @@ impl GlyphApp {
         self.loading_document = None;
         match result {
             Ok(summary) => {
+                self.editing = editing::EditingState::default();
+                self.markup = markup::MarkupState::default();
                 self.cancel_search();
                 self.search_hits.clear();
                 self.selected_search_hit = None;
@@ -526,6 +538,7 @@ impl GlyphApp {
         }
         self.rendered_page = Some(rendered);
         self.page_texture = Some(texture);
+        self.preview_ready();
         self.rendered_tile = None;
         self.tile_texture = None;
     }
@@ -615,7 +628,7 @@ impl GlyphApp {
                             );
                         }
                         Err(err) => {
-                            self.status = format!("Render failed: {err}");
+                            self.preview_failed(err);
                         }
                     }
                 }
@@ -719,8 +732,9 @@ impl GlyphApp {
             .as_ref()
             .map(|document| {
                 format!(
-                    "{} · {} sheets",
+                    "{}{} · {} sheets",
                     document.display_name(),
+                    if self.editing.dirty { " *" } else { "" },
                     document.summary.page_count
                 )
             })
@@ -775,6 +789,7 @@ impl GlyphApp {
         };
         let page_index = page_index.min(page_count.saturating_sub(1));
         if self.project.selected_page != page_index {
+            self.cancel_markup_selection();
             self.clear_page_text();
             self.project.selected_page = page_index;
             self.render_worker.set_view(page_index);
@@ -953,6 +968,11 @@ impl GlyphApp {
         self.start_automation(AutomationKind::Hyperlinks, ctx);
     }
     fn start_automation(&mut self, kind: AutomationKind, ctx: &egui::Context) {
+        if self.editing.dirty || self.edit_pending() || self.editing_modal_open() {
+            self.status =
+                "Save or discard your edits before running drawing-set automation.".into();
+            return;
+        }
         if self.automation_rx.is_some() || self.loading_document.is_some() {
             return;
         }
@@ -1425,6 +1445,12 @@ impl GlyphApp {
     }
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
+        if self.editing_modal_open() {
+            return;
+        }
+        if self.handle_edit_shortcuts(ctx) {
+            return;
+        }
         if ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::O)) {
             self.choose_pdf(ctx);
         }
@@ -1466,6 +1492,7 @@ impl GlyphApp {
         {
             return;
         }
+        self.markup_shortcuts(ctx);
         let copy = ctx.input_mut(|input| {
             let native_copy = input.events.iter().any(|e| matches!(e, egui::Event::Copy));
             if native_copy {
@@ -1509,12 +1536,15 @@ impl GlyphApp {
     fn draw(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         theme::refresh(&ctx);
+        self.apply_edit_results(&ctx);
+        self.guard_window_close(&ctx);
         self.apply_render_results(&ctx);
         self.apply_search_results();
         self.apply_automation_results(&ctx);
         self.automation_dialog(&ctx);
         self.handle_dropped_files(&ctx);
         self.handle_shortcuts(&ctx);
+        self.editing_dialogs(&ctx);
 
         egui::Panel::top("title_bar")
             .frame(
@@ -1533,12 +1563,21 @@ impl GlyphApp {
                             .color(theme::color(theme::ACCENT_STRONG)),
                     );
                     ui.separator();
-                    ui.label(
-                        egui::RichText::new(self.window_title())
-                            .monospace()
-                            .size(13.0)
-                            .color(theme::color(theme::TEXT)),
-                    );
+                    self.document_menu(ui, &ctx);
+                    ui.separator();
+                    let title = self.window_title();
+                    let title_width = (ui.available_width() - 180.).max(32.);
+                    ui.add_sized(
+                        [title_width, 18.],
+                        egui::Label::new(
+                            egui::RichText::new(&title)
+                                .monospace()
+                                .size(13.)
+                                .color(theme::color(theme::TEXT)),
+                        )
+                        .truncate(),
+                    )
+                    .on_hover_text(title);
                     ui.add_space(12.0);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         metric_pill(ui, &format_zoom_label(self.zoom));
@@ -1615,34 +1654,33 @@ impl GlyphApp {
                                                 .size(11.0)
                                                 .color(theme::color(theme::ACCENT)),
                                         );
-                                        ui.label(
-                                            egui::RichText::new(display_name)
-                                                .monospace()
-                                                .size(13.0)
-                                                .strong()
-                                                .color(theme::color(theme::TEXT)),
-                                        );
-                                        ui.with_layout(
-                                            egui::Layout::right_to_left(egui::Align::Center),
-                                            |ui| {
-                                                ui.label(
-                                                    egui::RichText::new(format_page_counter(
-                                                        self.project.selected_page,
-                                                        page_count,
-                                                    ))
-                                                    .size(12.0)
-                                                    .color(theme::color(theme::TEXT_MUTED)),
-                                                );
-                                            },
-                                        );
+                                        ui.add(
+                                            egui::Label::new(
+                                                egui::RichText::new(&display_name)
+                                                    .monospace()
+                                                    .size(13.0)
+                                                    .strong()
+                                                    .color(theme::color(theme::TEXT)),
+                                            )
+                                            .truncate(),
+                                        )
+                                        .on_hover_text(document.path.display().to_string());
                                     });
+                                    ui.label(
+                                        egui::RichText::new(format_page_counter(
+                                            self.project.selected_page,
+                                            page_count,
+                                        ))
+                                        .size(12.0)
+                                        .color(theme::color(theme::TEXT_MUTED)),
+                                    );
                                 });
                             ui.add_space(8.0);
                             ui.horizontal(|ui| {
                                 if ui
                                     .add_enabled(
                                         self.can_go_previous(),
-                                        egui::Button::new("← Prev")
+                                        egui::Button::new("< Prev")
                                             .fill(theme::color(theme::CONTROL))
                                             .corner_radius(4),
                                     )
@@ -1653,7 +1691,7 @@ impl GlyphApp {
                                 if ui
                                     .add_enabled(
                                         self.can_go_next(),
-                                        egui::Button::new("Next →")
+                                        egui::Button::new("Next >")
                                             .fill(theme::color(theme::CONTROL))
                                             .corner_radius(4),
                                     )
@@ -1726,6 +1764,7 @@ impl GlyphApp {
                                                         bookmark.page_index,
                                                         is_selected,
                                                     );
+                                                    self.bookmark_edit_menu(&response, index);
                                                     if response.clicked()
                                                         && let Some(page_index) =
                                                             bookmark.page_index
@@ -1773,11 +1812,11 @@ impl GlyphApp {
             .show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     ui.label(egui::RichText::new("▣").color(theme::color(theme::ACCENT)));
-                    ui.label(egui::RichText::new(&self.status).color(theme::color(theme::TEXT_MUTED)));
+                    ui.add(egui::Label::new(egui::RichText::new(self.persistent_edit_error().unwrap_or(&self.status)).color(if self.persistent_edit_error().is_some(){egui::Color32::LIGHT_RED}else{theme::color(theme::TEXT_MUTED)})).truncate()).on_hover_text(self.persistent_edit_error().unwrap_or(&self.status));
                     ui.separator();
                     ui.label(
                         egui::RichText::new(
-                            "Ctrl+O open · Ctrl+F search · Alt+←/→ history · middle drag pans · scroll zoom",
+                            "Ctrl+O open · Ctrl+F search · Alt+Left/Right history · middle drag pans · scroll zoom",
                         )
                         .color(theme::color(theme::TEXT_MUTED)),
                     );
@@ -1813,11 +1852,11 @@ impl GlyphApp {
                             }
                             self.draw_page_entry(ui);
                             ui.add_space(8.0);
-                            if ui.add_enabled_ui(self.loading_document.is_none(), |ui| tool_chip(ui, "Fit page")).inner.on_disabled_hover_text("Available after the document finishes loading.").on_hover_text("Ctrl+1").clicked() {
+                            if ui.add_enabled(self.loading_document.is_none(), tool_chip_button("Fit page")).on_disabled_hover_text("Available after the document finishes loading.").on_hover_text("Ctrl+1").clicked() {
                                 self.fit_to_page_requested = true;
                                 self.fit_to_width_requested = false;
                             }
-                            if ui.add_enabled_ui(self.loading_document.is_none(), |ui| tool_chip(ui, "Fit width")).inner.on_disabled_hover_text("Available after the document finishes loading.").on_hover_text("Ctrl+2").clicked() {
+                            if ui.add_enabled(self.loading_document.is_none(), tool_chip_button("Fit width")).on_disabled_hover_text("Available after the document finishes loading.").on_hover_text("Ctrl+2").clicked() {
                                 self.fit_to_width_requested = true;
                                 self.fit_to_page_requested = false;
                             }
@@ -1835,6 +1874,7 @@ impl GlyphApp {
                                 .on_disabled_hover_text("Temporarily disabled: appearance-preserving, reversible flattening is not implemented yet.");
                             ui.checkbox(&mut self.show_link_highlights, "Show links");
                         });
+                        ui.horizontal_wrapped(|ui|self.draw_markup_tools(ui,&ctx));
                     });
                 ui.add_space(12.0);
                 if let Some(error)=&self.text_error {ui.label(egui::RichText::new("Text selection unavailable").color(theme::color(theme::TEXT_MUTED))).on_hover_text(error);}
@@ -1842,12 +1882,12 @@ impl GlyphApp {
                 let available = ui.available_size();
                 let (rect, response) = ui.allocate_exact_size(available, egui::Sense::click_and_drag());
                 self.apply_view_fit(rect);
-                self.interact_with_page_text(ui,&response,rect);
+                if self.markup.mode==markup::Mode::View{self.interact_with_page_text(ui,&response,rect);}
                 let pointer_delta = ui.input(|i| i.pointer.delta());
                 let middle_pan = response.hovered()
                     && ui.input(|i| i.pointer.button_down(egui::PointerButton::Middle))
                     && pointer_delta != egui::Vec2::ZERO;
-                let primary_pan = response.dragged_by(egui::PointerButton::Primary) && !self.selecting_text;
+                let primary_pan = response.dragged_by(egui::PointerButton::Primary) && !self.selecting_text && self.markup.mode==markup::Mode::View;
                 if middle_pan || primary_pan {
                     self.pan += pointer_delta;
                     self.manual_view_changed();
@@ -1914,11 +1954,13 @@ impl GlyphApp {
                         let tile_rect = tile_screen_rect(tile, page_rect);
                         painter.image(tile_texture.id(),tile_rect,egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),egui::Color32::WHITE);
                     }
+                    self.interact_with_markup(ui,&response,page_rect,rect,page_index);
+                    self.paint_markup(&painter,page_rect,page_index);
                     self.paint_text_selection(&painter,page_rect,rect);
                     let mut link_target = None;
                     for link in &self.page_links {
                         let link_rect = overlay_screen_rect(link.rect, page_rect);
-                        let hovered = response.hover_pos().is_some_and(|pos| link_rect.contains(pos));
+                        let hovered = self.markup.mode==markup::Mode::View && response.hover_pos().is_some_and(|pos| link_rect.contains(pos));
                         if self.show_link_highlights || hovered {
                             painter.rect_filled(link_rect, 0.0, theme::translucent(theme::color(theme::ACCENT), if hovered { 70 } else { 30 }));
                             painter.rect_stroke(link_rect, 0.0, egui::Stroke::new(1.0, theme::color(theme::ACCENT)), egui::StrokeKind::Inside);
@@ -1945,6 +1987,8 @@ impl GlyphApp {
                     draw_empty_state(ui, rect);
                 }
             });
+        // Canvas release must commit before a same-frame Save starts a worker.
+        self.finish_save_intent(&ctx);
     }
 }
 
@@ -2126,18 +2170,21 @@ fn draw_canvas_backdrop(painter: &egui::Painter, rect: egui::Rect) {
     );
 }
 
-fn tool_chip(ui: &mut egui::Ui, label: &str) -> egui::Response {
-    ui.add(
-        egui::Button::new(
-            egui::RichText::new(label)
-                .color(theme::color(theme::TEXT))
-                .size(12.0),
-        )
-        .fill(theme::color(theme::PANEL_RAISED))
-        .stroke(egui::Stroke::new(1.0, theme::color(theme::STROKE)))
-        .corner_radius(egui::CornerRadius::same(4))
-        .min_size(egui::vec2(36.0, 26.0)),
+fn tool_chip_button(label: &str) -> egui::Button<'static> {
+    egui::Button::new(
+        egui::RichText::new(label)
+            .color(theme::color(theme::TEXT))
+            .size(12.0),
     )
+    .wrap_mode(egui::TextWrapMode::Extend)
+    .fill(theme::color(theme::PANEL_RAISED))
+    .stroke(egui::Stroke::new(1.0, theme::color(theme::STROKE)))
+    .corner_radius(egui::CornerRadius::same(4))
+    .min_size(egui::vec2(36.0, 26.0))
+}
+
+fn tool_chip(ui: &mut egui::Ui, label: &str) -> egui::Response {
+    ui.add(tool_chip_button(label))
 }
 
 fn sidebar_toggle_button(ui: &mut egui::Ui, label: &str, tooltip: &str) -> egui::Response {
@@ -2279,7 +2326,7 @@ fn bookmark_row(
     };
     let label = format_bookmark_label(title, depth, page_index);
     ui.add_enabled(
-        page_index.is_some(),
+        true,
         egui::Button::new(egui::RichText::new(label).color(text).size(13.0))
             .selected(selected)
             .fill(fill)

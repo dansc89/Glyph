@@ -43,19 +43,25 @@ def main():
     data+=f"trailer\n<< /Size {len(objects)+1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode()
     pdf.write_bytes(data)
     env = os.environ.copy()
-    env.update(DISPLAY=":79", WAYLAND_DISPLAY="", WINIT_UNIX_BACKEND="x11", XDG_SESSION_TYPE="x11")
+    isolation_spec = importlib.util.spec_from_file_location("isolation", Path(__file__).with_name("editing-qa.py"))
+    assert isolation_spec is not None and isolation_spec.loader is not None
+    isolation = importlib.util.module_from_spec(isolation_spec)
+    isolation_spec.loader.exec_module(isolation)
+    owned = None
+    env.update(WAYLAND_DISPLAY="", WINIT_UNIX_BACKEND="x11", XDG_SESSION_TYPE="x11")
     app = None
     results = []
-    xvfb_log = (args.out / "xvfb.log").open("w")
     app_log = (args.out / "glyph.log").open("w")
-    xvfb = subprocess.Popen(["Xvfb", ":79", "-screen", "0", "1600x1000x24", "-nolisten", "tcp"], env=env, stdout=xvfb_log, stderr=subprocess.STDOUT)
+
 
     def run(*command):
+        assert owned is not None
+        owned.ensure_alive()
         return subprocess.run(command, env=env, check=True, capture_output=True, text=True).stdout
 
     def screenshot(name):
         path = args.out / f"{name}.png"
-        run("ffmpeg", "-v", "error", "-y", "-f", "x11grab", "-video_size", "1600x1000", "-i", ":79", "-frames:v", "1", str(path))
+        run("ffmpeg", "-v", "error", "-y", "-f", "x11grab", "-video_size", "1600x1000", "-i", env["DISPLAY"], "-frames:v", "1", str(path))
         return path
 
     def wait_page(name, color):
@@ -91,11 +97,10 @@ def main():
         raise AssertionError(f"{name}: viewport never settled")
 
     try:
-        deadline = time.monotonic() + 10
-        while subprocess.run(["xdotool", "getdisplaygeometry"], env=env, capture_output=True).returncode:
-            if xvfb.poll() is not None or time.monotonic() > deadline:
-                raise RuntimeError("isolated X server failed")
-            time.sleep(.05)
+        owned = isolation.PrivateXvfb()
+        env = owned.env
+        assert owned is not None
+        owned.ensure_alive()
         app = subprocess.Popen([str(args.binary.resolve()), str(pdf.resolve())], env=env, stdout=app_log, stderr=subprocess.STDOUT)
         wait_page("01-initial-fit-page", (140, 51, 242))
         window=run("xdotool","search","--name","^Glyph$").splitlines()[0]
@@ -229,7 +234,7 @@ def main():
         (args.out / "results.json").write_text(json.dumps({"passed": True, "checks": results, "note": "Search uses OCR assertions; pan uses viewport image comparison; visual geometry review is additional. Timings include PNG capture and are not latency benchmarks."}, indent=2))
         print(json.dumps({"passed": True, "checks": results, "artifacts": str(args.out.resolve())}, indent=2))
     finally:
-        for process in (app, xvfb):
+        for process in (app,):
             if process is not None and process.poll() is None:
                 process.terminate()
                 try:
@@ -238,7 +243,8 @@ def main():
                     process.kill()
                     process.wait()
         app_log.close()
-        xvfb_log.close()
+        if owned is not None:
+            owned.close()
 
 
 if __name__ == "__main__":

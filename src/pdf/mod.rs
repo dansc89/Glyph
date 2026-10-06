@@ -1,8 +1,14 @@
 pub use automation::SheetAnalysis;
 mod automation;
+mod edit_session;
+mod page_labels;
+mod rectangles;
+pub use page_labels::MAX_PAGE_LABEL_CHARS;
+pub use rectangles::{RectangleAnnotation, ShapeAnnotation, ShapeKind};
 pub mod overlay;
 pub mod search;
 mod session;
+pub use edit_session::{EditableBookmark, EditablePdf};
 mod text;
 use crate::core::links::LinkProposal;
 use crate::core::sheet::SheetCandidate;
@@ -48,6 +54,8 @@ pub struct PdfPageInfo {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PdfBookmark {
+    #[serde(default)]
+    pub object_id: Option<ObjectId>,
     pub title: String,
     pub page_index: Option<usize>,
     pub depth: usize,
@@ -405,10 +413,15 @@ impl PdfEngine for LopdfInspectionEngine {
         let doc = Document::load(path).map_err(|err| PdfError::Load(err.to_string()))?;
         let page_map = doc.get_pages();
         let page_count = page_map.len();
-        let pages = (0..page_count)
-            .map(|index| PdfPageInfo {
+        // Page labels are optional navigation metadata: malformed trees must
+        // not prevent viewing. EditablePdf keeps strict parsing to avoid loss.
+        let pages = page_labels::read(&doc)
+            .unwrap_or_else(|_| (1..=page_count).map(|page| page.to_string()).collect())
+            .into_iter()
+            .enumerate()
+            .map(|(index, label)| PdfPageInfo {
                 index,
-                label: Some(format!("Page {}", index + 1)),
+                label: Some(label),
             })
             .collect();
         let page_index_by_id = page_map
@@ -470,6 +483,7 @@ fn walk_outline_siblings(
 
         if let Some(title) = item.get(b"Title").ok().and_then(pdf_string_to_utf8) {
             bookmarks.push(PdfBookmark {
+                object_id: Some(item_id),
                 title,
                 page_index: outline_item_target_page(doc, item, page_index_by_id),
                 depth,
@@ -532,8 +546,7 @@ fn resolve_dict_object<'a>(
 }
 
 fn pdf_string_to_utf8(object: &Object) -> Option<String> {
-    let bytes = object.as_str().ok()?;
-    let title = String::from_utf8_lossy(bytes).trim().to_owned();
+    let title = lopdf::decode_text_string(object).ok()?.trim().to_owned();
     (!title.is_empty()).then_some(title)
 }
 
@@ -800,6 +813,35 @@ mod tests {
         assert_eq!(summary.bookmarks[0].depth, 0);
     }
 
+    #[test]
+    fn inspection_carries_stable_outline_object_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("outline.pdf");
+        std::fs::write(&path, minimal_pdf_with_outline_bytes()).unwrap();
+        let doc = Document::load(&path).unwrap();
+        let outlines = doc
+            .catalog()
+            .unwrap()
+            .get(b"Outlines")
+            .unwrap()
+            .as_reference()
+            .unwrap();
+        let first = doc
+            .get_object(outlines)
+            .unwrap()
+            .as_dict()
+            .unwrap()
+            .get(b"First")
+            .unwrap()
+            .as_reference()
+            .unwrap();
+        let summary = LopdfInspectionEngine.inspect(&path).unwrap();
+        assert_eq!(
+            summary.bookmarks[0].object_id,
+            Some(first),
+            "outline identity must survive inspection"
+        );
+    }
     #[test]
     fn inspection_extracts_action_bookmark_destinations() {
         let dir = tempfile::tempdir().unwrap();

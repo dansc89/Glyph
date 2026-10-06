@@ -1,5 +1,23 @@
 use super::*;
 
+fn thumbnail_caption(page: usize, label: Option<&str>) -> String {
+    let number = (page + 1).to_string();
+    match label {
+        Some(label) if !label.is_empty() && label != number => format!("{number}  {label}"),
+        _ => format!("Page {number}"),
+    }
+}
+#[cfg(test)]
+mod label_caption_tests {
+    use super::*;
+    #[test]
+    fn numeric_defaults_have_clear_page_names_and_custom_labels_keep_physical_index() {
+        assert_eq!(thumbnail_caption(0, None), "Page 1");
+        assert_eq!(thumbnail_caption(1, Some("2")), "Page 2");
+        assert_eq!(thumbnail_caption(1, Some("A-201")), "2  A-201");
+    }
+}
+
 #[derive(Default)]
 pub(super) struct ThumbnailState {
     cache: HashMap<usize, Option<egui::TextureHandle>>,
@@ -94,15 +112,23 @@ impl GlyphApp {
                         .document
                         .as_ref()
                         .and_then(|d| d.summary.pages.get(page))
-                        .and_then(|p| p.label.as_deref())
-                        .unwrap_or("Page");
-                    painter.text(
-                        egui::pos2(rect.center().x, rect.bottom() - 15.),
-                        egui::Align2::CENTER_CENTER,
-                        format!("{}  {label}", page + 1),
+                        .and_then(|p| p.label.as_deref());
+                    let caption = thumbnail_caption(page, label);
+                    let mut job = egui::text::LayoutJob::simple(
+                        caption.clone(),
                         egui::FontId::monospace(11.),
                         theme::color(theme::TEXT),
+                        (rect.width() - 24.).max(1.),
                     );
+                    job.wrap.max_rows = 1;
+                    let galley = painter.layout_job(job);
+                    let position = egui::pos2(
+                        rect.center().x - galley.size().x / 2.,
+                        rect.bottom() - 15. - galley.size().y / 2.,
+                    );
+                    painter.galley(position, galley, theme::color(theme::TEXT));
+                    response.clone().on_hover_text(caption);
+                    self.page_edit_menu(&response, page);
                     if response.clicked() {
                         self.select_page(page, ui.ctx());
                     }

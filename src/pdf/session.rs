@@ -207,6 +207,28 @@ impl<'a> PdfiumSession<'a> {
         self.loads
     }
 
+    pub fn replace_document(
+        &mut self,
+        path: &Path,
+        generation: u64,
+        bytes: Vec<u8>,
+    ) -> Result<(), PdfError> {
+        validate_pdf_path(path)?;
+        if bytes.len() > 256 * 1024 * 1024 {
+            return Err(PdfError::Render(
+                "Edited render snapshot exceeds 256 MiB".into(),
+            ));
+        }
+        let document = self
+            .pdfium
+            .load_pdf_from_byte_vec(bytes, None)
+            .map_err(map_pdfium_load_error)?;
+        self.document = Some(document);
+        self.generation = Some(generation);
+        self.path = path.to_owned();
+        self.loads += 1;
+        Ok(())
+    }
     fn ensure_document(&mut self, path: &Path, generation: u64) -> Result<(), PdfError> {
         validate_pdf_path(path)?;
         if self.document.is_none() || self.generation != Some(generation) || self.path != path {
@@ -294,6 +316,38 @@ mod tests {
         doc.save(path).unwrap();
     }
 
+    #[test]
+    fn edited_snapshot_replaces_retained_render_source_without_writing_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("original.pdf");
+        let updated = dir.path().join("edited.pdf");
+        write_pdf(&path, "1 0 0");
+        write_pdf(&updated, "0 1 0");
+        let original = std::fs::read(&path).unwrap();
+        let pdfium = bind_render_pdfium().unwrap();
+        let mut session = PdfiumSession::new(&pdfium);
+        session.render_page(&path, 1, 0, 128).unwrap();
+        session
+            .replace_document(&path, 2, std::fs::read(&updated).unwrap())
+            .unwrap();
+        let image = session.render_page(&path, 2, 0, 128).unwrap();
+        assert!(
+            image
+                .rgba
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|p| p[1] > 200 && p[0] < 50),
+            "Rendering must use the edited memory snapshot, not the red source file"
+        );
+        session.render_page(&path, 2, 0, 256).unwrap();
+        assert_eq!(
+            session.document_load_count(),
+            2,
+            "Snapshot must remain retained across widths"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+    }
     #[test]
     fn normalization_reuses_render_document_and_reloads_generation() {
         let dir = tempfile::tempdir().unwrap();

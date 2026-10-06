@@ -40,6 +40,7 @@ pub(super) struct RenderJob {
 #[derive(Default)]
 struct JobQueue {
     generation: u64,
+    snapshot: Option<(u64, PathBuf, Vec<u8>)>,
     inspection: Option<RenderJob>,
     latest_inspection: u64,
     foreground: Option<RenderJob>,
@@ -69,6 +70,7 @@ impl JobQueue {
     }
 
     fn reset(&mut self, generation: u64) {
+        self.snapshot = None;
         self.links = None;
         self.latest_links = 0;
         self.text = None;
@@ -186,8 +188,9 @@ impl RenderWorker {
                     PathBuf,
                     Result<crate::pdf::InternalLinkIndex, PdfError>,
                 )> = None;
+                let mut source_error: Option<(u64, PathBuf, String)> = None;
                 loop {
-                    let job = {
+                    let (job, snapshot) = {
                         let (lock, wake) = &*worker_state;
                         let mut queue = lock.lock().unwrap();
                         while queue.len() == 0 && !queue.closed {
@@ -196,14 +199,31 @@ impl RenderWorker {
                         if queue.closed {
                             break;
                         }
-                        queue.pop().unwrap()
+                        (queue.pop().unwrap(), queue.snapshot.take())
+                    };
+                    if let Some((generation, path, bytes)) = snapshot {
+                        source_error = session.as_mut().map_or_else(
+                            || Some((generation, path.clone(), "PDFium unavailable".into())),
+                            |s| {
+                                s.replace_document(&path, generation, bytes)
+                                    .err()
+                                    .map(|e| (generation, path.clone(), e.to_string()))
+                            },
+                        );
+                    }
+                    let failed = source_error
+                        .as_ref()
+                        .filter(|(g, p, _)| *g == job.generation && *p == job.path);
+                    let mut active_session = if failed.is_some() {
+                        None
+                    } else {
+                        session.as_mut()
                     };
                     let error = || {
                         PdfError::Render(
-                            binding
-                                .as_ref()
-                                .err()
-                                .map(ToString::to_string)
+                            failed
+                                .map(|(_, _, e)| e.clone())
+                                .or_else(|| binding.as_ref().err().map(ToString::to_string))
                                 .unwrap_or_else(|| "PDFium unavailable".into()),
                         )
                     };
@@ -221,7 +241,7 @@ impl RenderWorker {
                             generation: job.generation,
                             path: job.path.clone(),
                             page_index,
-                            result: session.as_mut().map_or_else(
+                            result: active_session.as_mut().map_or_else(
                                 || Err(error()),
                                 |s| s.extract_page_text(&job.path, job.generation, page_index),
                             ),
@@ -243,7 +263,7 @@ impl RenderWorker {
                             path: job.path.clone(),
                             page_index,
                             target_width,
-                            result: session.as_mut().map_or_else(
+                            result: active_session.as_mut().map_or_else(
                                 || Err(error()),
                                 |s| {
                                     s.render_page(
@@ -260,7 +280,7 @@ impl RenderWorker {
                             generation: job.generation,
                             path: job.path.clone(),
                             request,
-                            result: session.as_mut().map_or_else(
+                            result: active_session.as_mut().map_or_else(
                                 || Err(error()),
                                 |s| s.render_tile(&job.path, job.generation, request),
                             ),
@@ -286,15 +306,21 @@ impl RenderWorker {
                                 continue;
                             }
                             let result = links.and_then(|mut links| {
+                                if failed.is_some() {
+                                    return Err(error());
+                                }
                                 let mut rects: Vec<_> =
                                     links.iter().map(|link| link.rect).collect();
                                 if !rects.is_empty() {
-                                    session.as_mut().ok_or_else(error)?.normalize_rectangles(
-                                        &job.path,
-                                        job.generation,
-                                        page_index,
-                                        &mut rects,
-                                    )?;
+                                    active_session
+                                        .as_mut()
+                                        .ok_or_else(error)?
+                                        .normalize_rectangles(
+                                            &job.path,
+                                            job.generation,
+                                            page_index,
+                                            &mut rects,
+                                        )?;
                                 }
                                 for (link, rect) in links.iter_mut().zip(rects) {
                                     link.rect = rect;
@@ -314,7 +340,7 @@ impl RenderWorker {
                             generation: job.generation,
                             path: job.path.clone(),
                             page_index,
-                            result: session.as_mut().map_or_else(
+                            result: active_session.as_mut().map_or_else(
                                 || Err(error()),
                                 |s| {
                                     s.render_page(&job.path, job.generation, page_index, 128)
@@ -330,7 +356,7 @@ impl RenderWorker {
                             path: job.path.clone(),
                             page_index,
                             target_width,
-                            result: session.as_mut().map_or_else(
+                            result: active_session.as_mut().map_or_else(
                                 || Err(error()),
                                 |s| {
                                     s.render_page(
@@ -356,6 +382,12 @@ impl RenderWorker {
             })
             .expect("start render worker");
         (Self { state }, rx)
+    }
+    pub fn replace_source(&self, generation: u64, path: PathBuf, bytes: Vec<u8>) {
+        let mut queue = self.state.0.lock().unwrap();
+        queue.reset(generation);
+        queue.snapshot = Some((generation, path, bytes));
+        self.state.1.notify_one();
     }
     pub fn set_thumbnails(&self, jobs: Vec<RenderJob>) {
         let mut queue = self.state.0.lock().unwrap();
@@ -431,6 +463,145 @@ mod tests {
             path: "test.pdf".into(),
             kind,
         }
+    }
+    fn invalid_snapshot_result(kind: JobKind) -> RenderJobResult {
+        use lopdf::{Document, Object, dictionary};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("valid-on-disk.pdf");
+        let mut doc = Document::with_version("1.7");
+        let pages = doc.new_object_id();
+        let page = doc.new_object_id();
+        let link = doc.add_object(dictionary! {"Type"=>"Annot", "Subtype"=>"Link", "Rect"=>vec![10.into(),10.into(),50.into(),50.into()], "Dest"=>vec![Object::Reference(page), Object::Name(b"Fit".to_vec())]});
+        doc.objects.insert(page, dictionary! {"Type"=>"Page", "Parent"=>pages, "MediaBox"=>vec![0.into(),0.into(),200.into(),200.into()], "Annots"=>vec![Object::Reference(link)]}.into());
+        doc.objects.insert(
+            pages,
+            dictionary! {"Type"=>"Pages", "Kids"=>vec![Object::Reference(page)], "Count"=>1}.into(),
+        );
+        let root = doc.add_object(dictionary! {"Type"=>"Catalog", "Pages"=>pages});
+        doc.trailer.set("Root", root);
+        doc.save(&path).unwrap();
+        assert_eq!(
+            crate::pdf::InternalLinkIndex::load(&path)
+                .unwrap()
+                .links(0)
+                .unwrap()
+                .len(),
+            1
+        );
+        let ctx = egui::Context::default();
+        let (worker, rx) = RenderWorker::new(&ctx);
+        // First populate the real PDFium session from disk, then reject a replacement.
+        worker.submit(RenderJob {
+            id: 1,
+            generation: 1,
+            path: path.clone(),
+            kind: JobKind::Page {
+                page_index: 0,
+                target_width: 128,
+            },
+        });
+        assert!(matches!(
+            rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap(),
+            RenderJobResult::Page { result: Ok(_), .. }
+        ));
+        worker.replace_source(2, path.clone(), b"invalid PDF snapshot".to_vec());
+        worker.submit(RenderJob {
+            id: 2,
+            generation: 2,
+            path,
+            kind,
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap()
+    }
+    #[test]
+    fn invalid_snapshot_page_does_not_fall_back_to_disk() {
+        assert!(matches!(
+            invalid_snapshot_result(JobKind::Page {
+                page_index: 0,
+                target_width: 128
+            }),
+            RenderJobResult::Page {
+                result: Err(PdfError::Render(_)),
+                ..
+            }
+        ));
+    }
+    #[test]
+    fn invalid_snapshot_text_does_not_fall_back_to_disk() {
+        assert!(matches!(
+            invalid_snapshot_result(JobKind::Text { page_index: 0 }),
+            RenderJobResult::Text {
+                result: Err(PdfError::Render(_)),
+                ..
+            }
+        ));
+    }
+    #[test]
+    fn invalid_snapshot_link_normalization_does_not_fall_back_to_disk() {
+        assert!(
+            matches!(
+                invalid_snapshot_result(JobKind::Links { page_index: 0 }),
+                RenderJobResult::Links {
+                    result: Err(PdfError::Render(_)),
+                    ..
+                }
+            ),
+            "link normalization must use source-error-gated session, never reopen disk"
+        );
+    }
+    #[test]
+    fn worker_renders_snapshot_instead_of_original_source() {
+        use lopdf::{Document, Object, Stream, dictionary};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("original.pdf");
+        fn bytes(color: &str) -> Vec<u8> {
+            let mut d = Document::with_version("1.7");
+            let pages = d.new_object_id();
+            let c = d.add_object(Stream::new(
+                dictionary! {},
+                format!("{color} rg 20 20 160 160 re f").into_bytes(),
+            ));
+            let page=d.add_object(dictionary!{"Type"=>"Page","Parent"=>pages,"MediaBox"=>vec![0.into(),0.into(),200.into(),200.into()],"Contents"=>c,"Resources"=>dictionary!{}});
+            d.objects.insert(
+                pages,
+                Object::Dictionary(
+                    dictionary! {"Type"=>"Pages","Kids"=>vec![page.into()],"Count"=>1},
+                ),
+            );
+            let root = d.add_object(dictionary! {"Type"=>"Catalog","Pages"=>pages});
+            d.trailer.set("Root", root);
+            let mut b = vec![];
+            d.save_to(&mut b).unwrap();
+            b
+        }
+        let original = bytes("1 0 0");
+        std::fs::write(&path, &original).unwrap();
+        let ctx = egui::Context::default();
+        let (worker, rx) = RenderWorker::new(&ctx);
+        worker.replace_source(2, path.clone(), bytes("0 1 0"));
+        worker.submit(RenderJob {
+            id: 1,
+            generation: 2,
+            path: path.clone(),
+            kind: JobKind::Page {
+                page_index: 0,
+                target_width: 128,
+            },
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap() {
+            RenderJobResult::Page { result, .. } => assert!(
+                result
+                    .unwrap()
+                    .rgba
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .any(|p| p[1] > 200 && p[0] < 50),
+                "Worker must install memory snapshot before foreground rendering"
+            ),
+            _ => panic!("unexpected result"),
+        }
+        assert_eq!(std::fs::read(path).unwrap(), original);
     }
     #[test]
     fn thumbnails_are_bounded_and_foreground_precedes_them() {

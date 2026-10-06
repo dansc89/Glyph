@@ -13,7 +13,7 @@ Glyph is **not** a web wrapper. It is a native Rust desktop app.
 - Rendering path: PDFium via `pdfium-bundled`, embedded at build time so the app does not need a system PDFium install
 - Development: native Rust builds/tests on an x86_64 Linux desktop; GitHub Actions produces Linux release artifacts
 
-## Current visual MVP
+## Viewer features
 
 - Load a PDF by file picker, pasted path, drag-and-drop, or CLI argument (`glyph file.pdf`)
 - Render the selected page with PDFium
@@ -29,7 +29,7 @@ Glyph is **not** a web wrapper. It is a native Rust desktop app.
 Easiest path today:
 
 ```bash
-curl -fsSL https://github.com/dansc89/Glyph/releases/download/1.2/install-glyph-arch.sh | sh
+curl -fsSL https://github.com/dansc89/Glyph/releases/download/1.3/install-glyph-arch.sh | sh
 glyph
 ```
 
@@ -71,7 +71,7 @@ That extracts the AppImage payload into your user profile and installs a normal 
 
 An Arch-friendly source package recipe lives at `packaging/arch/PKGBUILD` for later AUR packaging.
 
-## Local development features
+## Drawing-set features
 
 The current development branch adds full-document selectable-text search (Ctrl+F), highlighted results, internal hyperlink navigation, optional link highlights, and Back/Forward history (Alt+Left/Alt+Right). Search runs in the background and can be cancelled; OCR is not yet implemented. The Pages tab now has clickable, virtualized thumbnails. Drag over PDF text and use Ctrl+C to copy it; drag empty space or use the middle button to pan. Text extraction and preview rendering share the background renderer and use bounded resources.
 
@@ -79,7 +79,11 @@ Auto bookmarks now detects sheet identifiers from selectable title-block text, r
 
 Flatten is temporarily disabled: the former implementation removed annotations rather than preserving their appearance. Do not use it as a flattening solution.
 
-The supported Drawbridge parity target and outstanding gaps are tracked in [`docs/drawbridge-parity.md`](docs/drawbridge-parity.md). These changes are not a published release.
+The supported Drawbridge parity target and outstanding gaps are tracked in [`docs/drawbridge-parity.md`](docs/drawbridge-parity.md). Release 1.3 adds native rectangle/ellipse markup, bookmark-title and embedded page-label editing, shared Undo/Redo, and guarded Save/Save As with backups. See [`docs/releases/1.3.md`](docs/releases/1.3.md) for verification and remaining limits.
+
+## Markup and save
+
+Use `R` for rectangles, `E` for ellipses and `V` to select owned markups; Delete removes the selected shape. `Ctrl+Z` / `Ctrl+Shift+Z` undo/redo and `Ctrl+S` saves. Unsaved edits stay in memory; Save verifies a staged PDF before atomic replacement and retains a backup. Save As refuses collisions. Bookmark titles and page labels share the edit history. Imported annotations are preserved, not automatically made editable. Stroke is currently red/unfilled/2 pt; further tools, manipulation and styles remain pending.
 
 ## Omarchy integration
 
