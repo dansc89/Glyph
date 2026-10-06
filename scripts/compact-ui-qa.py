@@ -82,6 +82,8 @@ def main():
     parser.add_argument('--binary', type=Path, required=True)
     parser.add_argument('--out', type=Path, required=True)
     parser.add_argument('--baseline', type=Path)
+    parser.add_argument('--exercise-window-reposition', action='store_true',
+                        help='Exercise capture recovery from an off-screen owned test window')
     args = parser.parse_args()
     out = args.out.resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -94,6 +96,8 @@ def main():
     # Use a deterministic fallback palette, not the user's current desktop theme.
     display.env['XDG_STATE_HOME'] = str(out / 'isolated-state')
     checks, images, measurements, apps = [], [], {}, []
+    window = None
+    viewport = [960, 640]
 
     def check(name, value):
         checks.append({'name': name, 'passed': bool(value)})
@@ -108,6 +112,26 @@ def main():
         run('xdotool', 'key', '--clearmodifiers', keys)
 
     def shot(name):
+        # Winit can issue a delayed configure/move after xdotool resizes a
+        # window on unmanaged Xvfb. Confirm size AND origin before capturing.
+        expected = {'X': 0, 'Y': 0, 'WIDTH': viewport[0], 'HEIGHT': viewport[1]}
+        deadline, stable = time.monotonic() + 10, 0
+        while time.monotonic() < deadline:
+            observed = dict(line.split('=', 1) for line in
+                            run('xdotool', 'getwindowgeometry', '--shell', window).splitlines())
+            if all(int(observed[k]) == v for k, v in expected.items()):
+                stable += 1
+                if stable >= 3:
+                    break
+            else:
+                stable = 0
+                if any(int(observed[k]) != expected[k] for k in ('WIDTH', 'HEIGHT')):
+                    run('xdotool', 'windowsize', '--sync', window,
+                        str(viewport[0]), str(viewport[1]))
+                run('xdotool', 'windowmove', '--sync', window, '0', '0')
+            time.sleep(.05)
+        else:
+            raise AssertionError(f'Owned window did not settle at {expected}: {observed}')
         path = out / (name + '.png')
         run('ffmpeg', '-y', '-loglevel', 'error', '-f', 'x11grab', '-video_size',
             '1600x1000', '-draw_mouse', '0', '-i', display.env['DISPLAY'], '-frames:v', '1', '-threads', '1', str(path))
@@ -139,6 +163,7 @@ def main():
               and paper[2] < canvas[2] - 8 and paper[3] < canvas[3] - 8)
 
     def launch(path=None):
+        viewport[:] = [960, 640]
         log = open(out / f'app-{len(apps)}.log', 'w')
         app = subprocess.Popen([str(args.binary.resolve())] + ([str(path)] if path else []),
                                env=display.env, stdout=log, stderr=log)
@@ -176,6 +201,8 @@ def main():
 
     try:
         app, window = launch(pdf)
+        if args.exercise_window_reposition:
+            run('xdotool', 'windowmove', '--sync', window, '0', '-280')
         image = ready('01-compact-minimum')
         measurements['minimum'] = geometry(image, 960, 640)
         g = measurements['minimum']
@@ -207,6 +234,7 @@ def main():
         key('ctrl+1')
         time.sleep(.3)
 
+        viewport[:] = [1600, 1000]
         run('xdotool', 'windowsize', '--sync', window, '1600', '1000')
         time.sleep(.4)
         image = shot('04-compact-large')

@@ -30,7 +30,7 @@ jobs:
       - name: Build release
         run: cargo build --locked --release
       - name: GUI smoke test
-        run: python3 scripts/compact-ui-qa.py --binary target/release/glyph --out dist/gui-qa
+        run: python3 scripts/compact-ui-qa.py --binary target/release/glyph --exercise-window-reposition --out dist/gui-qa
       - name: Viewer regression checks
         run: python3 scripts/performance-qa.py --binary target/release/glyph --out dist/viewer-qa
       - name: Isolated markup save/recovery regression
