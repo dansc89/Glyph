@@ -251,14 +251,20 @@ def main():
             # numeric fields are located from actual rendered popup labels.
             click(point(.52, .68)); stable('reselected-arrow-for-properties')
             click((args.properties_x, args.properties_y)); time.sleep(.4)
-            def text_boxes(name):
-                shot(name).close()
-                data = run('tesseract', str(out/(name+'.png')), 'stdout', '--psm', '11', 'tsv')
+            def text_boxes(name, scale=1):
+                image = shot(name)
+                ocr_path = out/(name+'.png')
+                if scale != 1:
+                    ocr_path = out/(name+'-ocr-scaled.png')
+                    image.resize((image.width*scale, image.height*scale)).save(ocr_path)
+                image.close()
+                data = run('tesseract', str(ocr_path), 'stdout', '--psm', '11', 'tsv')
+                (out/(name+'-ocr-'+str(scale)+'.tsv')).write_text(data)
                 result = []
                 for line in data.splitlines()[1:]:
                     columns = line.split('\t')
                     if len(columns) == 12 and columns[11].strip():
-                        result.append((columns[11].strip(), *(int(v) for v in columns[6:10])))
+                        result.append((columns[11].strip(), *(int(v)//scale for v in columns[6:10])))
                 return result
             for label, value in [('Red', '0'), ('Green', '1'), ('Blue', '0'), ('Width', '4')]:
                 candidates = [row for row in text_boxes('properties-before-'+label.lower())
@@ -271,6 +277,11 @@ def main():
                 run('xdotool', 'type', '--clearmodifiers', '--delay', '40', value)
                 key('Return'); time.sleep(.15)
             buttons = [row for row in text_boxes('properties-ready-apply') if row[0].lower() == 'apply']
+            if len(buttons) != 1:
+                # Small dark-theme button glyphs differ between Tesseract releases.
+                # Re-read larger pixels, then map OCR coordinates back to the owned window.
+                buttons = [row for row in text_boxes('properties-ready-apply-scaled', scale=3)
+                           if row[0].lower() == 'apply']
             require(len(buttons) == 1, 'native Apply button missing/ambiguous')
             _, x, y, w, h = buttons[0]; click((x+w//2, y+h//2)); stable('properties-applied')
             styled = [dict(row) for row in expected]
