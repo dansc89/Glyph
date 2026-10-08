@@ -48,6 +48,7 @@ enum HistoryChange {
         before: Option<Object>,
         after: Option<Object>,
     },
+    ShapeUpdate(Vec<(ObjectId, Option<Object>, Object)>),
     Title(Box<Change>),
     PageLabel {
         index: usize,
@@ -246,7 +247,261 @@ fn serialized_dictionary_equal(a: &lopdf::Dictionary, b: &lopdf::Dictionary) -> 
         })
 }
 
+// Inspect raw edges, not get_object() (which follows reference chains). Include
+// trailer, stream dictionaries and even detached objects: any additional edge
+// can represent foreign ownership. A bounded/incomplete inspection fails closed.
+fn exclusive_appearance(doc: &Document, annotation: &lopdf::Dictionary) -> Option<ObjectId> {
+    let ap = annotation.get(b"AP").ok()?.as_dict().ok()?;
+    let id = ap.get(b"N").ok()?.as_reference().ok()?;
+    if !matches!(doc.objects.get(&id), Some(Object::Stream(_))) {
+        return None;
+    }
+    let mut stack: Vec<_> = doc.objects.values().map(|o| (o, 0)).collect();
+    stack.extend(doc.trailer.iter().map(|(_, o)| (o, 0)));
+    let mut references = 0;
+    let mut inspected = 0;
+    while let Some((object, depth)) = stack.pop() {
+        inspected += 1;
+        if depth > 256 || inspected > 1_000_000 {
+            return None;
+        }
+        match object {
+            Object::Reference(target) if *target == id => {
+                references += 1;
+                if references > 1 {
+                    return None;
+                }
+            }
+            Object::Array(array) => stack.extend(array.iter().map(|o| (o, depth + 1))),
+            Object::Dictionary(dict) | Object::Stream(lopdf::Stream { dict, .. }) => {
+                stack.extend(dict.iter().map(|(_, o)| (o, depth + 1)));
+            }
+            _ => {}
+        }
+    }
+    (references == 1).then_some(id)
+}
+
 impl EditablePdf {
+    pub fn display_page_size(&self, page: usize) -> Result<[f32; 2], PdfError> {
+        let id = *self
+            .doc
+            .get_pages()
+            .values()
+            .nth(page)
+            .ok_or_else(|| edit_error("page index out of range"))?;
+        let (b, rotation) = super::rectangles::page_geometry(&self.doc, id)?;
+        let size = [b[2] - b[0], b[3] - b[1]];
+        Ok(if matches!(rotation, 90 | 270) {
+            [size[1], size[0]]
+        } else {
+            size
+        })
+    }
+    /// Atomically replaces geometry, reusing only provably exclusive appearances.
+    pub fn update_shape(&mut self, shape: &super::ShapeAnnotation) -> Result<bool, PdfError> {
+        let shapes = super::rectangles::read(&self.doc)?;
+        let Some(old) = shapes.iter().find(|a| a.object_id == shape.object_id) else {
+            return Ok(false);
+        };
+        if old.page_index != shape.page_index || old.kind != shape.kind {
+            return Err(edit_error("shape identity changed"));
+        }
+        if old == shape {
+            return Ok(false);
+        }
+        let page = *self.doc.get_pages().values().nth(old.page_index).unwrap();
+        // Detached validation: no object allocation or history mutation on failure.
+        let mut staged = self.doc.clone();
+        let id = match shape.kind {
+            super::ShapeKind::Text => super::free_text::create(
+                &mut staged,
+                page,
+                shape.rect,
+                shape
+                    .text
+                    .as_ref()
+                    .ok_or_else(|| edit_error("missing text"))?,
+                shape.style,
+            )?,
+            super::ShapeKind::Line | super::ShapeKind::Arrow => super::lines::create_styled(
+                &mut staged,
+                page,
+                shape
+                    .endpoints
+                    .ok_or_else(|| edit_error("missing endpoints"))?,
+                shape.kind == super::ShapeKind::Arrow,
+                shape.style,
+            )?,
+            kind => {
+                super::rectangles::create_styled(&mut staged, page, shape.rect, kind, shape.style)?
+            }
+        };
+        let generated = staged
+            .get_object(id)
+            .map_err(edit_error)?
+            .as_dict()
+            .map_err(edit_error)?
+            .clone();
+        let before = self
+            .doc
+            .get_object(old.object_id)
+            .map_err(edit_error)?
+            .clone();
+        let mut after = before.as_dict().map_err(edit_error)?.clone();
+        let reusable_ap = exclusive_appearance(&self.doc, &after);
+        let mut appearance =
+            super::rectangles::resolve(&self.doc, after.get(b"AP").map_err(edit_error)?)?
+                .as_dict()
+                .map_err(edit_error)?
+                .clone();
+        let generated_ap = generated
+            .get(b"AP")
+            .map_err(edit_error)?
+            .as_dict()
+            .map_err(edit_error)?
+            .get(b"N")
+            .map_err(edit_error)?
+            .as_reference()
+            .map_err(edit_error)?;
+        for (key, value) in generated.iter() {
+            // Identity, page association and annotation flags are not geometry.
+            // Preserve standard/custom metadata rather than resetting it to the
+            // defaults used when creating a new annotation.
+            if [
+                b"AP".as_slice(),
+                b"Type",
+                b"Subtype",
+                b"P",
+                b"F",
+                b"GlyphRectangle",
+                b"GlyphEllipse",
+                b"GlyphLine",
+                b"GlyphArrow",
+            ]
+            .contains(&key.as_slice())
+            {
+                continue;
+            }
+            if key == b"BS" {
+                let mut border = after
+                    .get(b"BS")
+                    .ok()
+                    .and_then(|o| resolve(&self.doc, o))
+                    .and_then(|o| o.as_dict().ok())
+                    .cloned()
+                    .unwrap_or_default();
+                for (k, v) in value.as_dict().map_err(edit_error)?.iter() {
+                    border.set(k.clone(), v.clone());
+                }
+                after.set(key.clone(), border);
+                continue;
+            }
+            after.set(key.clone(), value.clone());
+        }
+        let replacement = staged.get_object(generated_ap).map_err(edit_error)?.clone();
+        // All fallible detached validation is complete before allocating an ID.
+        let ap_id = reusable_ap.unwrap_or_else(|| self.doc.new_object_id());
+        appearance.set("N", ap_id);
+        after.set("AP", appearance);
+        let change = HistoryChange::ShapeUpdate(vec![
+            (old.object_id, Some(before), Object::Dictionary(after)),
+            (ap_id, self.doc.objects.get(&ap_id).cloned(), replacement),
+        ]);
+        self.apply(&change, true);
+        self.push_change(change);
+        Ok(true)
+    }
+    pub fn add_text(
+        &mut self,
+        page: usize,
+        rect: crate::core::links::PdfRect,
+        text: &str,
+        size: f32,
+        style: super::ShapeStyle,
+    ) -> Result<bool, PdfError> {
+        let page_id = self
+            .doc
+            .get_pages()
+            .values()
+            .nth(page)
+            .copied()
+            .ok_or_else(|| edit_error("page index out of range"))?;
+        let (before, mut annots) = super::rectangles::annots(&self.doc, page_id)?;
+        let id = super::free_text::create(
+            &mut self.doc,
+            page_id,
+            rect,
+            &super::TextMarkup {
+                contents: text.into(),
+                size,
+            },
+            style,
+        )?;
+        annots.push(Object::Reference(id));
+        let change = HistoryChange::Shape {
+            page: page_id,
+            before,
+            after: Some(Object::Array(annots)),
+        };
+        self.apply(&change, true);
+        self.push_change(change);
+        Ok(true)
+    }
+    pub fn validate_text(
+        &self,
+        page: usize,
+        rect: crate::core::links::PdfRect,
+        text: &super::TextMarkup,
+        style: super::ShapeStyle,
+    ) -> Result<(), PdfError> {
+        let p = self
+            .doc
+            .get_pages()
+            .values()
+            .nth(page)
+            .copied()
+            .ok_or_else(|| edit_error("page index out of range"))?;
+        super::free_text::appearance(&self.doc, p, rect, text, style).map(|_| ())
+    }
+    pub fn add_line(
+        &mut self,
+        page: usize,
+        endpoints: [f32; 4],
+        arrow: bool,
+    ) -> Result<bool, PdfError> {
+        self.add_line_styled(page, endpoints, arrow, super::ShapeStyle::default())
+    }
+    pub fn add_line_styled(
+        &mut self,
+        page: usize,
+        endpoints: [f32; 4],
+        arrow: bool,
+        style: super::ShapeStyle,
+    ) -> Result<bool, PdfError> {
+        let page_id = self
+            .doc
+            .get_pages()
+            .values()
+            .nth(page)
+            .copied()
+            .ok_or_else(|| edit_error("page index out of range"))?;
+        let (before, mut annots) = super::rectangles::annots(&self.doc, page_id)?;
+        let id = if style == super::ShapeStyle::default() {
+            super::lines::create(&mut self.doc, page_id, endpoints, arrow)?
+        } else {
+            super::lines::create_styled(&mut self.doc, page_id, endpoints, arrow, style)?
+        };
+        annots.push(Object::Reference(id));
+        let change = HistoryChange::Shape {
+            page: page_id,
+            before,
+            after: Some(Object::Array(annots)),
+        };
+        self.apply(&change, true);
+        self.push_change(change);
+        Ok(true)
+    }
     pub fn add_ellipse(
         &mut self,
         page: usize,
@@ -278,6 +533,15 @@ impl EditablePdf {
         rect: crate::core::links::PdfRect,
         kind: super::ShapeKind,
     ) -> Result<bool, PdfError> {
+        self.add_shape_styled(page, rect, kind, super::ShapeStyle::default())
+    }
+    pub fn add_shape_styled(
+        &mut self,
+        page: usize,
+        rect: crate::core::links::PdfRect,
+        kind: super::ShapeKind,
+        style: super::ShapeStyle,
+    ) -> Result<bool, PdfError> {
         let page_id = self
             .doc
             .get_pages()
@@ -286,7 +550,11 @@ impl EditablePdf {
             .copied()
             .ok_or_else(|| edit_error("page index out of range"))?;
         let (before, mut annots) = super::rectangles::annots(&self.doc, page_id)?;
-        let id = super::rectangles::create(&mut self.doc, page_id, rect, kind)?;
+        let id = if style == super::ShapeStyle::default() {
+            super::rectangles::create(&mut self.doc, page_id, rect, kind)?
+        } else {
+            super::rectangles::create_styled(&mut self.doc, page_id, rect, kind, style)?
+        };
         annots.push(Object::Reference(id));
         let change = HistoryChange::Shape {
             page: page_id,
@@ -482,10 +750,26 @@ impl EditablePdf {
             .map(|e| &e.title)
             .ne(self.checkpoint.iter())
             || self.labels != self.label_checkpoint
-            || self.shapes() != self.shape_checkpoint
+            || super::rectangles::read(&self.doc)
+                .ok()
+                .is_none_or(|shapes| shapes != self.shape_checkpoint)
     }
     fn apply(&mut self, change: &HistoryChange, forward: bool) {
         let c = match change {
+            HistoryChange::ShapeUpdate(objects) => {
+                for (id, before, after) in objects {
+                    if let Some(value) = if forward {
+                        Some(after)
+                    } else {
+                        before.as_ref()
+                    } {
+                        self.doc.objects.insert(*id, value.clone());
+                    } else {
+                        self.doc.objects.remove(id);
+                    }
+                }
+                return;
+            }
             HistoryChange::Shape {
                 page,
                 before,
@@ -640,7 +924,12 @@ impl EditablePdf {
             {
                 continue;
             }
-            let other = saved.get_object(*id).map_err(edit_error)?;
+            // Compare raw objects: get_object follows aliases and would compare
+            // a preserved Reference against its target rather than its saved edge.
+            let other = saved
+                .objects
+                .get(id)
+                .ok_or_else(|| edit_error(format!("staged PDF object {id:?} missing")))?;
             if !serialized_object_equal(object, other) {
                 return Err(edit_error(format!(
                     "staged PDF object {id:?} changed unexpectedly"
@@ -757,6 +1046,74 @@ impl EditablePdf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    include!("text_markup_tests.rs");
+
+    #[test]
+    fn text_markup_persists_readable_contents_and_appearance_with_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("text.pdf");
+        fixture(&path);
+        let mut s = EditablePdf::open(&path).unwrap();
+        let rect = crate::core::links::PdfRect {
+            x: 0.1,
+            y: 0.1,
+            width: 0.7,
+            height: 0.3,
+        };
+        assert!(
+            s.add_text(
+                0,
+                rect,
+                "Readable (text)\\ proof\nSecond line",
+                12.,
+                super::super::ShapeStyle::default()
+            )
+            .unwrap()
+        );
+        let shapes = s.shapes();
+        assert_eq!(shapes.len(), 1);
+        let d = s
+            .doc
+            .get_object(shapes[0].object_id)
+            .unwrap()
+            .as_dict()
+            .unwrap();
+        assert_eq!(d.get(b"Subtype").unwrap().as_name().unwrap(), b"FreeText");
+        assert_eq!(
+            lopdf::decode_text_string(d.get(b"Contents").unwrap()).unwrap(),
+            "Readable (text)\\ proof\nSecond line"
+        );
+        let ap = super::super::rectangles::resolve(&s.doc, d.get(b"AP").unwrap())
+            .unwrap()
+            .as_dict()
+            .unwrap();
+        let stream = super::super::rectangles::resolve(&s.doc, ap.get(b"N").unwrap())
+            .unwrap()
+            .as_stream()
+            .unwrap();
+        let decoded = lopdf::content::Content::decode(&stream.content).unwrap();
+        assert_eq!(
+            decoded
+                .operations
+                .iter()
+                .filter(|op| op.operator == "Tj")
+                .count(),
+            2
+        );
+        let readable_appearance = decoded
+            .operations
+            .iter()
+            .filter(|op| op.operator == "Tj")
+            .map(|op| String::from_utf8(op.operands[0].as_str().unwrap().to_vec()).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(readable_appearance, "Readable (text)\\ proof\nSecond line");
+        assert!(s.undo());
+        assert!(s.shapes().is_empty());
+        assert!(s.redo());
+        s.save().unwrap();
+        assert_eq!(EditablePdf::open(&path).unwrap().shapes(), shapes);
+    }
 
     // Owned synthetic component fixture: no user documents, rendering or GUI.
     fn synthetic_hundred_page_fixture(path: &Path) {
@@ -928,6 +1285,7 @@ mod tests {
                 match kind {
                     ShapeKind::Rectangle => assert!(s.add_rectangle(page, rect).unwrap()),
                     ShapeKind::Ellipse => assert!(s.add_ellipse(page, rect).unwrap()),
+                    _ => unreachable!("rectangle/ellipse fixture"),
                 }
                 expected.push((page, kind, rect));
             }
@@ -1443,6 +1801,420 @@ mod tests {
         }
         assert!(s.undo() && !s.is_dirty());
         assert!(s.redo() && s.is_dirty());
+    }
+
+    #[test]
+    fn line_arrow_geometry_all_rotations_crop_directions_and_native_render() {
+        use crate::pdf::{PdfRenderEngine, PdfiumRenderEngine};
+        let dir = tempfile::tempdir().unwrap();
+        for rotation in [0, 90, 180, 270] {
+            let path = dir.path().join(format!("line-{rotation}.pdf"));
+            fixture(&path);
+            let mut d = Document::load(&path).unwrap();
+            let page = *d.get_pages().values().next().unwrap();
+            let p = d.get_object_mut(page).unwrap().as_dict_mut().unwrap();
+            let parent = p.get(b"Parent").unwrap().as_reference().unwrap();
+            for key in [b"MediaBox".as_slice(), b"CropBox", b"Rotate"] {
+                p.remove(key);
+            }
+            let p = d.get_object_mut(parent).unwrap().as_dict_mut().unwrap();
+            p.set("MediaBox", vec![0.into(), 0.into(), 400.into(), 300.into()]);
+            p.set(
+                "CropBox",
+                vec![30.into(), 40.into(), 350.into(), 240.into()],
+            );
+            p.set("Rotate", rotation);
+            let foreign=d.add_object(dictionary!{"Subtype"=>"Line","Rect"=>vec![10.into(),10.into(),20.into(),20.into()],"L"=>vec![10.into(),10.into(),20.into(),20.into()]});
+            let foreign_value = d.get_object(foreign).unwrap().clone();
+            let (_, mut annotations) = super::super::rectangles::annots(&d, page).unwrap();
+            annotations.push(Object::Reference(foreign));
+            d.get_object_mut(page)
+                .unwrap()
+                .as_dict_mut()
+                .unwrap()
+                .set("Annots", annotations);
+            d.save(&path).unwrap();
+            let mut s = EditablePdf::open(&path).unwrap();
+            let endpoints = [0.125, 0.25, 0.75, 0.875];
+            s.add_line(0, endpoints, true).unwrap();
+            let shape = s.shapes()[0].clone();
+            assert_eq!(shape.endpoints, Some(endpoints));
+            let line = s
+                .doc
+                .get_object(shape.object_id)
+                .unwrap()
+                .as_dict()
+                .unwrap();
+            let l = line
+                .get(b"L")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_float().unwrap())
+                .collect::<Vec<_>>();
+            let expected = match rotation {
+                0 => [70., 190., 270., 65.],
+                90 => [110., 65., 310., 190.],
+                180 => [310., 90., 110., 215.],
+                _ => [270., 215., 70., 90.],
+            };
+            assert_eq!(l, expected, "inherited CropBox + Rotate {rotation}");
+            s.save().unwrap();
+            assert_eq!(
+                Document::load(&path).unwrap().get_object(foreign).unwrap(),
+                &foreign_value
+            );
+            assert!(!s.delete_shape(foreign).unwrap());
+            let image = PdfiumRenderEngine.render_page(&path, 0, 640).unwrap();
+            let near = |x: f32, y: f32| {
+                let px = (x * image.width as f32) as isize;
+                let py = (y * image.height as f32) as isize;
+                (-5..=5).any(|dy| {
+                    (-5..=5).any(|dx| {
+                        let (x, y) = (px + dx, py + dy);
+                        if x < 0 || y < 0 || x >= image.width as isize || y >= image.height as isize
+                        {
+                            return false;
+                        }
+                        let i = (y as usize * image.width + x as usize) * 4;
+                        let c = &image.rgba[i..i + 4];
+                        c[0] > 180 && c[1] < 80 && c[2] < 80
+                    })
+                })
+            };
+            assert!(
+                near(0.4375, 0.5625),
+                "PDFium actual vector line at display midpoint, rotation {rotation}"
+            );
+            for head in shape.line_head.unwrap().as_chunks::<2>().0 {
+                assert!(near(head[0], head[1]), "actual open arrow head ink");
+            }
+            for arrow in [false, true] {
+                for e in [
+                    [0., 0., 1., 0.],
+                    [0., 0., 0., 1.],
+                    [1., 1., 0., 1.],
+                    [1., 1., 1., 0.],
+                    [1., 0., 0., 1.],
+                    [0., 1., 1., 0.],
+                ] {
+                    s.add_line(0, e, arrow).unwrap();
+                }
+            }
+            s.save().unwrap();
+            assert_eq!(EditablePdf::open(&path).unwrap().shapes(), s.shapes());
+        }
+    }
+    #[test]
+    fn line_arrow_invalid_endpoints_atomic_history_dirty_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("invalid-line.pdf");
+        fixture(&path);
+        let mut s = EditablePdf::open(&path).unwrap();
+        s.add_line(0, [0., 0., 1., 1.], false).unwrap();
+        assert!(s.undo());
+        let objects = s.doc.objects.clone();
+        for n in [
+            [f32::NAN, 0., 1., 1.],
+            [0., f32::INFINITY, 1., 1.],
+            [-0.1, 0., 1., 1.],
+            [0., 0., 1.1, 1.],
+            [0.5, 0.5, 0.5, 0.5],
+        ] {
+            assert!(s.add_line(0, n, true).is_err());
+            assert_eq!(s.doc.objects, objects);
+            assert!(!s.is_dirty() && s.can_redo() && !s.can_undo());
+        }
+        assert!(s.add_line(99, [0., 0., 1., 1.], false).is_err());
+        assert_eq!(s.doc.objects, objects);
+    }
+    #[test]
+    fn line_arrow_appearance_matrix_rejects_corruption_without_save_side_effects() {
+        for arrow in [false, true] {
+            for case in 0..12 {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("matrix-source.pdf");
+                fixture(&path);
+                let mut s = EditablePdf::open(&path).unwrap();
+                s.add_line(0, [0.1, 0.2, 0.8, 0.7], arrow).unwrap();
+                s.save().unwrap();
+                // Preserve a real redo entry as well as undo history on failed save.
+                s.add_line(0, [0.2, 0.3, 0.7, 0.6], arrow).unwrap();
+                assert!(s.undo());
+                let id = s.shapes()[0].object_id;
+                let ap = s
+                    .doc
+                    .get_object(id)
+                    .unwrap()
+                    .as_dict()
+                    .unwrap()
+                    .get(b"AP")
+                    .unwrap()
+                    .as_dict()
+                    .unwrap()
+                    .get(b"N")
+                    .unwrap()
+                    .as_reference()
+                    .unwrap();
+                let identity = || vec![1.into(), 0.into(), 0.into(), 1.into(), 0.into(), 0.into()];
+                let matrix = match case {
+                    0 => Object::Array(vec![
+                        1.into(),
+                        0.into(),
+                        Object::Real(0.5),
+                        1.into(),
+                        0.into(),
+                        0.into(),
+                    ]),
+                    1 => Object::Array(vec![
+                        0.into(),
+                        1.into(),
+                        (-1).into(),
+                        0.into(),
+                        0.into(),
+                        0.into(),
+                    ]),
+                    2 => Object::Array(vec![]),
+                    3 => Object::Array(vec![1.into(), 0.into(), 0.into(), 1.into(), 0.into()]),
+                    4 => Object::Array(vec![
+                        1.into(),
+                        0.into(),
+                        0.into(),
+                        1.into(),
+                        0.into(),
+                        0.into(),
+                        0.into(),
+                    ]),
+                    5 => {
+                        let mut a = identity();
+                        a[0] = Object::Name(b"one".to_vec());
+                        Object::Array(a)
+                    }
+                    6 => {
+                        let mut a = identity();
+                        a[0] = Object::Real(f32::NAN);
+                        Object::Array(a)
+                    }
+                    7 => {
+                        let mut a = identity();
+                        a[0] = Object::Real(f32::INFINITY);
+                        Object::Array(a)
+                    }
+                    8 => Object::Null,
+                    9 => Object::Reference((999999, 0)),
+                    10 => {
+                        let id = s.doc.new_object_id();
+                        s.doc.objects.insert(id, Object::Reference(id));
+                        Object::Reference(id)
+                    }
+                    _ => Object::Reference(s.doc.add_object(dictionary! {})),
+                };
+                s.doc
+                    .get_object_mut(ap)
+                    .unwrap()
+                    .as_stream_mut()
+                    .unwrap()
+                    .dict
+                    .set("Matrix", matrix);
+                let source = std::fs::read(&path).unwrap();
+                let checkpoints = (
+                    s.checkpoint.clone(),
+                    s.label_checkpoint.clone(),
+                    s.shape_checkpoint.clone(),
+                );
+                let history = (s.undo.len(), s.redo.len());
+                let source_hash = s.source_hash;
+                let backup = s.last_backup.clone();
+                assert!(
+                    s.save().is_err(),
+                    "matrix case {case}, arrow {arrow} must fail closed"
+                );
+                assert_eq!(std::fs::read(&path).unwrap(), source);
+                assert_eq!(
+                    (
+                        s.checkpoint.clone(),
+                        s.label_checkpoint.clone(),
+                        s.shape_checkpoint.clone()
+                    ),
+                    checkpoints
+                );
+                assert_eq!((s.undo.len(), s.redo.len()), history);
+                assert_eq!(s.source_hash, source_hash);
+                assert_eq!(s.last_backup, backup);
+                assert!(s.is_dirty() && s.can_undo() && s.can_redo());
+                let corrupt = dir.path().join("corrupt-matrix.pdf");
+                s.doc.save(&corrupt).unwrap();
+                assert!(
+                    EditablePdf::open(&corrupt).is_err(),
+                    "open matrix case {case}, arrow {arrow}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn line_arrow_appearance_identity_matrix_roundtrips() {
+        for arrow in [false, true] {
+            for indirect in [false, true] {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("identity-matrix.pdf");
+                fixture(&path);
+                let mut s = EditablePdf::open(&path).unwrap();
+                s.add_line(0, [0.1, 0.2, 0.8, 0.7], arrow).unwrap();
+                let shapes = s.shapes();
+                let ap = s
+                    .doc
+                    .get_object(shapes[0].object_id)
+                    .unwrap()
+                    .as_dict()
+                    .unwrap()
+                    .get(b"AP")
+                    .unwrap()
+                    .as_dict()
+                    .unwrap()
+                    .get(b"N")
+                    .unwrap()
+                    .as_reference()
+                    .unwrap();
+                // Generated forms omit Matrix; PDF defaults that to identity.
+                assert!(
+                    !s.doc
+                        .get_object(ap)
+                        .unwrap()
+                        .as_stream()
+                        .unwrap()
+                        .dict
+                        .has(b"Matrix")
+                );
+                let mut matrix = Object::Array(vec![
+                    1.into(),
+                    Object::Real(0.),
+                    0.into(),
+                    Object::Real(1.),
+                    0.into(),
+                    0.into(),
+                ]);
+                if indirect {
+                    matrix = Object::Reference(s.doc.add_object(matrix));
+                }
+                s.doc
+                    .get_object_mut(ap)
+                    .unwrap()
+                    .as_stream_mut()
+                    .unwrap()
+                    .dict
+                    .set("Matrix", matrix);
+                s.save().unwrap();
+                assert_eq!(EditablePdf::open(&path).unwrap().shapes(), shapes);
+                assert!(!s.is_dirty());
+            }
+        }
+    }
+
+    #[test]
+    fn line_arrow_malformed_schema_rejects_without_write_or_checkpoint_change() {
+        let dir = tempfile::tempdir().unwrap();
+        for case in 0..10 {
+            let path = dir.path().join(format!("malformed-line-{case}.pdf"));
+            fixture(&path);
+            let mut s = EditablePdf::open(&path).unwrap();
+            s.add_line(0, [0.1, 0.2, 0.8, 0.7], true).unwrap();
+            let id = s.shapes()[0].object_id;
+            let a = s.doc.get_object_mut(id).unwrap().as_dict_mut().unwrap();
+            match case {
+                0 => a.set("GlyphArrow", 2),
+                1 => a.set("GlyphArrow", Object::Boolean(true)),
+                2 => a.set("GlyphLine", 1),
+                3 => a.set("GlyphEllipse", 1),
+                4 => a.set("Subtype", "Square"),
+                5 => a.set(
+                    "GlyphNormalizedEndpoints",
+                    vec![0.into(), 0.into(), 2.into(), 1.into()],
+                ),
+                6 => a.set("L", vec![0.into(), 0.into(), 1.into(), 1.into()]),
+                7 => a.set(
+                    "LE",
+                    vec![
+                        Object::Name(b"None".to_vec()),
+                        Object::Name(b"None".to_vec()),
+                    ],
+                ),
+                8 => a.set("AP", dictionary! {}),
+                _ => a.set(
+                    "GlyphNormalizedEndpoints",
+                    vec![Object::Real(f32::NAN), 0.into(), 1.into(), 1.into()],
+                ),
+            }
+            let original = std::fs::read(&path).unwrap();
+            let checkpoint = s.checkpoint.clone();
+            assert!(s.save().is_err(), "malformed case {case}");
+            assert_eq!(std::fs::read(&path).unwrap(), original);
+            assert_eq!(s.checkpoint, checkpoint);
+            assert!(s.is_dirty() && s.can_undo());
+            let malformed = dir.path().join(format!("bad-line-{case}.pdf"));
+            s.doc.save(&malformed).unwrap();
+            assert!(
+                EditablePdf::open(&malformed).is_err(),
+                "reopen malformed case {case}"
+            );
+        }
+    }
+
+    #[test]
+    fn line_arrow_roundtrip_shared_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lines.pdf");
+        fixture(&path);
+        let original = std::fs::read(&path).unwrap();
+        let mut s = EditablePdf::open(&path).unwrap();
+        for arrow in [false, true] {
+            assert!(s.add_line(0, [0.125, 0.25, 0.75, 0.875], arrow).unwrap());
+        }
+        assert_eq!(s.shapes().len(), 2);
+        let id = s.shapes()[1].object_id;
+        assert!(s.delete_shape(id).unwrap());
+        assert_eq!(s.shapes().len(), 1);
+        assert!(s.undo());
+        assert_eq!(s.shapes().len(), 2);
+        assert!(s.redo());
+        assert_eq!(s.shapes().len(), 1);
+        assert!(s.undo());
+        s.save().unwrap();
+        assert!(!s.is_dirty());
+        assert_eq!(
+            std::fs::read(s.last_backup_path().unwrap()).unwrap(),
+            original
+        );
+        assert_eq!(EditablePdf::open(&path).unwrap().shapes(), s.shapes());
+        let saved = std::fs::read(&path).unwrap();
+        let copy = dir.path().join("line-copy.pdf");
+        s.save_as(&copy).unwrap();
+        assert_eq!(s.path(), copy);
+        assert_eq!(std::fs::read(&path).unwrap(), saved);
+        assert_eq!(EditablePdf::open(&copy).unwrap().shapes(), s.shapes());
+        assert!(s.undo() && s.is_dirty());
+        assert!(s.redo() && !s.is_dirty());
+    }
+
+    #[test]
+    fn line_arrow_owned_marker_must_not_be_silently_foreign() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("line-marker.pdf");
+        fixture(&path);
+        let mut doc = lopdf::Document::load(&path).unwrap();
+        let page = *doc.get_pages().values().next().unwrap();
+        let id = doc.add_object(dictionary! { "Subtype" => "Line", "GlyphLine" => 2 });
+        doc.get_object_mut(page)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Annots", vec![Object::Reference(id)]);
+        doc.save(&path).unwrap();
+        assert!(
+            EditablePdf::open(&path).is_err(),
+            "malformed owned line must fail closed"
+        );
     }
 
     #[test]
@@ -2260,6 +3032,608 @@ mod tests {
             "native Rect must be nondegenerate even within mapping tolerance"
         );
     }
+    #[test]
+    fn markup_polish_style_geometry_save_undo_all_rotations_preserve_source_objects() {
+        use super::super::{ShapeKind, ShapeStyle};
+        for rotation in [0, 90, 180, 270] {
+            for kind in [
+                ShapeKind::Rectangle,
+                ShapeKind::Ellipse,
+                ShapeKind::Line,
+                ShapeKind::Arrow,
+            ] {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("crop.pdf");
+                fixture(&path);
+                let mut source = Document::load(&path).unwrap();
+                let page = *source.get_pages().values().next().unwrap();
+                let p = source.get_object_mut(page).unwrap().as_dict_mut().unwrap();
+                p.set(
+                    "CropBox",
+                    vec![10.into(), 20.into(), 280.into(), 260.into()],
+                );
+                p.set("Rotate", rotation);
+                let link = source
+                    .get_object(page)
+                    .unwrap()
+                    .as_dict()
+                    .unwrap()
+                    .get(b"Annots")
+                    .unwrap()
+                    .as_array()
+                    .unwrap()[0]
+                    .as_reference()
+                    .unwrap();
+                let foreign_ap=source.add_object(lopdf::Stream::new(dictionary! {"Subtype"=>"Form","BBox"=>vec![0.into(),0.into(),20.into(),20.into()],"Matrix"=>vec![2.into(),0.into(),0.into(),2.into(),0.into(),0.into()]},b"0 0 m 20 20 l S".to_vec()));
+                source
+                    .get_object_mut(link)
+                    .unwrap()
+                    .as_dict_mut()
+                    .unwrap()
+                    .set("AP", dictionary! {"N"=>foreign_ap});
+                source.save(&path).unwrap();
+                let mut s = EditablePdf::open(&path).unwrap();
+                assert_eq!(
+                    s.display_page_size(0).unwrap(),
+                    if matches!(rotation, 90 | 270) {
+                        [240., 270.]
+                    } else {
+                        [270., 240.]
+                    }
+                );
+                let style = ShapeStyle {
+                    rgb: [0.2, 0.4, 0.8],
+                    weight: 5.,
+                };
+                if matches!(kind, ShapeKind::Line | ShapeKind::Arrow) {
+                    s.add_line_styled(0, [0.2, 0.2, 0.6, 0.6], kind == ShapeKind::Arrow, style)
+                        .unwrap();
+                } else {
+                    s.add_shape_styled(
+                        0,
+                        crate::core::links::PdfRect {
+                            x: 0.2,
+                            y: 0.2,
+                            width: 0.4,
+                            height: 0.4,
+                        },
+                        kind,
+                        style,
+                    )
+                    .unwrap();
+                }
+                s.save().unwrap();
+                let before = s.shapes()[0].clone();
+                let count = s.doc.objects.len();
+                let history = s.undo.len();
+                let mut changed = before.clone();
+                changed.style = ShapeStyle {
+                    rgb: [0.1, 0.6, 0.3],
+                    weight: 3.,
+                };
+                if let Some(mut n) = changed.endpoints {
+                    n[0] = 0.3;
+                    n[1] = 0.3;
+                    changed.endpoints = Some(n);
+                } else {
+                    changed.rect.x = 0.3;
+                    changed.rect.y = 0.3;
+                    changed.rect.width = 0.3;
+                    changed.rect.height = 0.3;
+                }
+                assert!(s.update_shape(&changed).unwrap());
+                let after = s.shapes()[0].clone();
+                assert_eq!(after.object_id, before.object_id);
+                assert_eq!(s.doc.objects.len(), count);
+                assert_eq!(s.undo.len(), history + 1);
+                assert!(!s.update_shape(&after).unwrap());
+                assert_eq!(s.undo.len(), history + 1);
+                s.save().unwrap();
+                assert_eq!(
+                    EditablePdf::open(&path).unwrap().shapes(),
+                    vec![after.clone()]
+                );
+                assert!(s.undo());
+                assert_eq!(s.shapes(), vec![before]);
+                assert!(s.is_dirty());
+                assert!(s.redo());
+                assert_eq!(s.shapes(), vec![after]);
+                assert!(!s.is_dirty());
+                let reopened = Document::load(&path).unwrap();
+                for (id, value) in &source.objects {
+                    if *id != page && value.type_name().ok() != Some(b"XRef".as_slice()) {
+                        assert!(
+                            serialized_object_equal(value, reopened.get_object(*id).unwrap()),
+                            "source object {id:?} changed for {kind:?}, rotation {rotation}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    #[test]
+    fn markup_polish_atomic_geometry_update_preserves_identity_and_checkpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("edit.pdf");
+        fixture(&path);
+        let mut s = EditablePdf::open(&path).unwrap();
+        s.add_rectangle(
+            0,
+            crate::core::links::PdfRect {
+                x: 0.1,
+                y: 0.2,
+                width: 0.3,
+                height: 0.2,
+            },
+        )
+        .unwrap();
+        s.save().unwrap();
+        let before = s.shapes()[0].clone();
+        let mut after = before.clone();
+        after.rect.x = 0.2;
+        let history = s.undo.len();
+        assert!(
+            s.update_shape(&after).unwrap(),
+            "moving an owned shape must commit"
+        );
+        assert_eq!(s.undo.len(), history + 1);
+        assert_eq!(s.shapes(), vec![after.clone()]);
+        assert!(s.is_dirty());
+        assert!(!s.update_shape(&after).unwrap());
+        assert_eq!(s.undo.len(), history + 1);
+        assert!(s.undo());
+        assert_eq!(s.shapes(), vec![before]);
+        assert!(!s.is_dirty());
+        assert!(s.redo());
+        s.save().unwrap();
+        assert_eq!(EditablePdf::open(&path).unwrap().shapes(), vec![after]);
+    }
+    #[test]
+    fn markup_polish_style_update_is_persisted_in_native_appearance() {
+        use super::super::{ShapeKind, ShapeStyle};
+        for kind in [
+            ShapeKind::Rectangle,
+            ShapeKind::Ellipse,
+            ShapeKind::Line,
+            ShapeKind::Arrow,
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("styled.pdf");
+            fixture(&path);
+            let mut s = EditablePdf::open(&path).unwrap();
+            if matches!(kind, ShapeKind::Line | ShapeKind::Arrow) {
+                s.add_line(0, [0.2, 0.3, 0.7, 0.6], kind == ShapeKind::Arrow)
+                    .unwrap();
+            } else {
+                s.add_shape(
+                    0,
+                    crate::core::links::PdfRect {
+                        x: 0.2,
+                        y: 0.3,
+                        width: 0.4,
+                        height: 0.2,
+                    },
+                    kind,
+                )
+                .unwrap();
+            }
+            let mut shape = s.shapes()[0].clone();
+            shape.style = ShapeStyle {
+                rgb: [0.2, 0.4, 0.8],
+                weight: 5.,
+            };
+            assert!(s.update_shape(&shape).unwrap());
+            assert_eq!(
+                s.shapes()[0].style,
+                shape.style,
+                "native style must change for {kind:?}"
+            );
+            s.save().unwrap();
+            assert_eq!(
+                EditablePdf::open(&path).unwrap().shapes()[0].style,
+                shape.style
+            );
+            let d = s
+                .doc
+                .get_object(shape.object_id)
+                .unwrap()
+                .as_dict()
+                .unwrap();
+            let ap = d
+                .get(b"AP")
+                .unwrap()
+                .as_dict()
+                .unwrap()
+                .get(b"N")
+                .unwrap()
+                .as_reference()
+                .unwrap();
+            let bytes = s
+                .doc
+                .get_object(ap)
+                .unwrap()
+                .as_stream()
+                .unwrap()
+                .get_plain_content()
+                .unwrap();
+            assert!(
+                String::from_utf8(bytes)
+                    .unwrap()
+                    .contains("0.2 0.4 0.8 RG 5 w")
+            );
+        }
+    }
+    #[test]
+    fn markup_polish_rectangle_transformed_appearance_rejected_without_mutation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("matrix.pdf");
+        fixture(&path);
+        let mut s = EditablePdf::open(&path).unwrap();
+        s.add_rectangle(
+            0,
+            crate::core::links::PdfRect {
+                x: 0.2,
+                y: 0.3,
+                width: 0.4,
+                height: 0.2,
+            },
+        )
+        .unwrap();
+        let shape = s.shapes()[0].clone();
+        let ap = s
+            .doc
+            .get_object(shape.object_id)
+            .unwrap()
+            .as_dict()
+            .unwrap()
+            .get(b"AP")
+            .unwrap()
+            .as_dict()
+            .unwrap()
+            .get(b"N")
+            .unwrap()
+            .as_reference()
+            .unwrap();
+        s.doc
+            .get_object_mut(ap)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set(
+                "Matrix",
+                vec![1.into(), 0.into(), 0.into(), 1.into(), 10.into(), 0.into()],
+            );
+        let history = s.undo.len();
+        let original = std::fs::read(&path).unwrap();
+        assert!(s.save().is_err(), "owned rectangle Matrix must be identity");
+        assert_eq!(s.undo.len(), history);
+        assert!(s.is_dirty());
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+    }
+    #[test]
+    fn shared_appearance_foreign_annotation_is_preserved() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("shared.pdf");
+        fixture(&path);
+        let mut s = EditablePdf::open(&path).unwrap();
+        s.add_rectangle(
+            0,
+            crate::core::links::PdfRect {
+                x: 0.2,
+                y: 0.3,
+                width: 0.4,
+                height: 0.2,
+            },
+        )
+        .unwrap();
+        let mut shape = s.shapes()[0].clone();
+        let ap = s
+            .doc
+            .get_object(shape.object_id)
+            .unwrap()
+            .as_dict()
+            .unwrap()
+            .get(b"AP")
+            .unwrap()
+            .as_dict()
+            .unwrap()
+            .get(b"N")
+            .unwrap()
+            .as_reference()
+            .unwrap();
+        let page = *s.doc.get_pages().values().next().unwrap();
+        let foreign = s
+            .doc
+            .get_object(page)
+            .unwrap()
+            .as_dict()
+            .unwrap()
+            .get(b"Annots")
+            .unwrap()
+            .as_array()
+            .unwrap()[0]
+            .as_reference()
+            .unwrap();
+        s.doc
+            .get_object_mut(foreign)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("AP", dictionary! {"N" => ap});
+        let original = s.doc.objects[&ap].clone();
+        shape.rect.width = 0.3;
+        assert!(s.update_shape(&shape).unwrap());
+        assert_eq!(
+            s.doc.objects[&ap], original,
+            "foreign appearance stream was mutated"
+        );
+        check_shared_appearance("foreign-direct");
+    }
+
+    // Exercise the actual document graph and persistence, not just AP lookup.
+    fn check_shared_appearance(mode: &str) {
+        use super::super::{ShapeKind, ShapeStyle};
+        for kind in [
+            ShapeKind::Rectangle,
+            ShapeKind::Ellipse,
+            ShapeKind::Line,
+            ShapeKind::Arrow,
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("shared-history.pdf");
+            fixture(&path);
+            let mut s = EditablePdf::open(&path).unwrap();
+            if matches!(kind, ShapeKind::Line | ShapeKind::Arrow) {
+                s.add_line(0, [0.2, 0.3, 0.6, 0.5], kind == ShapeKind::Arrow)
+                    .unwrap();
+            } else {
+                s.add_shape(
+                    0,
+                    crate::core::links::PdfRect {
+                        x: 0.2,
+                        y: 0.3,
+                        width: 0.4,
+                        height: 0.2,
+                    },
+                    kind,
+                )
+                .unwrap();
+            }
+            let shape = s.shapes()[0].clone();
+            let mut appearance = s.doc.objects[&shape.object_id]
+                .as_dict()
+                .unwrap()
+                .get(b"AP")
+                .unwrap()
+                .as_dict()
+                .unwrap()
+                .clone();
+            let stream = appearance.get(b"N").unwrap().as_reference().unwrap();
+            // Non-normal appearance entries must survive detachment too.
+            let rollover = s.doc.add_object(s.doc.objects[&stream].clone());
+            appearance.set("R", rollover);
+            appearance.set(
+                "VendorAP",
+                Object::string_literal("keep appearance metadata"),
+            );
+            let page = *s.doc.get_pages().values().next().unwrap();
+            let foreign = s.doc.objects[&page]
+                .as_dict()
+                .unwrap()
+                .get(b"Annots")
+                .unwrap()
+                .as_array()
+                .unwrap()[0]
+                .as_reference()
+                .unwrap();
+            let ap: Object = match mode {
+                "foreign-direct" => {
+                    s.doc
+                        .get_object_mut(foreign)
+                        .unwrap()
+                        .as_dict_mut()
+                        .unwrap()
+                        .set("AP", dictionary! {"N" => stream});
+                    appearance.clone().into()
+                }
+                "indirect-ap" | "ap-chain" => {
+                    let id = s.doc.add_object(appearance.clone());
+                    s.doc
+                        .get_object_mut(foreign)
+                        .unwrap()
+                        .as_dict_mut()
+                        .unwrap()
+                        .set("AP", id);
+                    if mode == "ap-chain" {
+                        s.doc.add_object(Object::Reference(id)).into()
+                    } else {
+                        id.into()
+                    }
+                }
+                "n-chain" => {
+                    let alias = s.doc.add_object(Object::Reference(stream));
+                    appearance.set("N", alias);
+                    s.doc
+                        .get_object_mut(foreign)
+                        .unwrap()
+                        .as_dict_mut()
+                        .unwrap()
+                        .set("AP", dictionary! {"N" => alias});
+                    appearance.clone().into()
+                }
+                "xobject" => {
+                    s.doc
+                        .get_object_mut(page)
+                        .unwrap()
+                        .as_dict_mut()
+                        .unwrap()
+                        .set(
+                            "Resources",
+                            dictionary! {"XObject" => dictionary! {"Shared" => stream}},
+                        );
+                    appearance.clone().into()
+                }
+                "foreign-chain" => {
+                    let alias = s.doc.add_object(Object::Reference(stream));
+                    s.doc
+                        .get_object_mut(foreign)
+                        .unwrap()
+                        .as_dict_mut()
+                        .unwrap()
+                        .set("AP", dictionary! {"N" => alias});
+                    appearance.clone().into()
+                }
+                _ => panic!("unknown sharing mode"),
+            };
+            let owned = s
+                .doc
+                .get_object_mut(shape.object_id)
+                .unwrap()
+                .as_dict_mut()
+                .unwrap();
+            owned.set("AP", ap);
+            owned.set("F", 132);
+            owned.set("NM", Object::string_literal("stable identity"));
+            owned.set("Contents", Object::string_literal("review note"));
+            owned.set(
+                "VendorData",
+                dictionary! {"nested" => vec![1.into(), 2.into()]},
+            );
+            owned
+                .get_mut(b"BS")
+                .unwrap()
+                .as_dict_mut()
+                .unwrap()
+                .set("VendorBorder", 17);
+            s.save().unwrap();
+            let original = s.doc.objects.clone();
+            let before = s.shapes()[0].clone();
+            let history = s.undo.len();
+            let max_id = s.doc.max_id;
+            let mut invalid = before.clone();
+            invalid.style.weight = f32::NAN;
+            assert!(s.update_shape(&invalid).is_err());
+            assert_eq!(s.doc.objects, original);
+            assert_eq!(s.doc.max_id, max_id);
+            assert_eq!(s.undo.len(), history);
+            let mut changed = before.clone();
+            changed.style = ShapeStyle {
+                rgb: [0.2, 0.6, 0.8],
+                weight: 3.,
+            };
+            if let Some(mut endpoints) = changed.endpoints {
+                endpoints[0] = 0.3;
+                changed.endpoints = Some(endpoints);
+            } else {
+                changed.rect.width = 0.3;
+            }
+            assert!(s.update_shape(&changed).unwrap());
+            assert_eq!(s.doc.objects.len(), original.len() + 1);
+            let edited = s.doc.objects.clone();
+            let edited_shape = s.shapes()[0].clone();
+            let owned_after = edited[&shape.object_id].as_dict().unwrap();
+            let old_owned = original[&shape.object_id].as_dict().unwrap();
+            for key in [
+                b"F".as_slice(),
+                b"NM",
+                b"Contents",
+                b"VendorData",
+                b"P",
+                b"Type",
+                b"Subtype",
+            ] {
+                assert_eq!(owned_after.get(key).unwrap(), old_owned.get(key).unwrap());
+            }
+            assert_eq!(
+                owned_after
+                    .get(b"BS")
+                    .unwrap()
+                    .as_dict()
+                    .unwrap()
+                    .get(b"VendorBorder")
+                    .unwrap(),
+                &Object::Integer(17)
+            );
+            let new_ap = owned_after.get(b"AP").unwrap().as_dict().unwrap();
+            assert_eq!(new_ap.get(b"R").unwrap(), &Object::Reference(rollover));
+            assert_eq!(
+                new_ap.get(b"VendorAP").unwrap(),
+                appearance.get(b"VendorAP").unwrap()
+            );
+            let new_stream = new_ap.get(b"N").unwrap().as_reference().unwrap();
+            assert_ne!(new_stream, stream);
+            for (id, value) in &original {
+                if *id != shape.object_id {
+                    assert_eq!(
+                        &edited[id], value,
+                        "{mode} {kind:?}: changed foreign {id:?}"
+                    );
+                }
+            }
+            // Save/reload edited, undo-save/reload original, redo-save/reload edited.
+            for forward in [true, false, true] {
+                if !forward {
+                    assert!(s.undo());
+                    assert_eq!(s.doc.objects, original);
+                } else if !s.doc.objects.contains_key(&new_stream) {
+                    assert!(s.redo());
+                    assert_eq!(s.doc.objects, edited);
+                }
+                s.save().unwrap();
+                let reloaded = Document::load(&path).unwrap();
+                let expected = if forward { &edited } else { &original };
+                for (id, value) in expected {
+                    if value.type_name().ok() != Some(b"XRef".as_slice()) {
+                        assert!(
+                            serialized_object_equal(value, &reloaded.objects[id]),
+                            "reload {mode} {kind:?}: {id:?}"
+                        );
+                    }
+                }
+                assert_eq!(
+                    EditablePdf::open(&path).unwrap().shapes(),
+                    vec![if forward {
+                        edited_shape.clone()
+                    } else {
+                        before.clone()
+                    }]
+                );
+            }
+            // Once detached, exclusively owned transforms must reuse the new ID.
+            let count = s.doc.objects.len();
+            let max_id = s.doc.max_id;
+            for i in 0..100 {
+                let mut next = s.shapes()[0].clone();
+                next.style.weight = if i % 2 == 0 { 4. } else { 3. };
+                assert!(s.update_shape(&next).unwrap());
+                assert_eq!(s.doc.objects.len(), count);
+                assert_eq!(s.doc.max_id, max_id);
+            }
+        }
+    }
+
+    #[test]
+    fn shared_appearance_indirect_dictionary_history_roundtrip() {
+        check_shared_appearance("indirect-ap");
+    }
+    #[test]
+    fn shared_appearance_ap_reference_chain_history_roundtrip() {
+        check_shared_appearance("ap-chain");
+    }
+    #[test]
+    fn shared_appearance_normal_reference_chain_history_roundtrip() {
+        check_shared_appearance("n-chain");
+    }
+    #[test]
+    fn shared_appearance_page_xobject_history_roundtrip() {
+        check_shared_appearance("xobject");
+    }
+    #[test]
+    fn shared_appearance_foreign_reference_chain_history_roundtrip() {
+        check_shared_appearance("foreign-chain");
+    }
+
     fn fixture(path: &Path) {
         let mut d = Document::with_version("1.7");
         let pages = d.new_object_id();

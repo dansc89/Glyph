@@ -9,6 +9,9 @@ mod markup;
 #[cfg(test)]
 mod render_failure_tests;
 mod render_worker;
+mod sheet_picker;
+#[cfg(test)]
+mod sheet_picker_tests;
 #[cfg(test)]
 mod shortcut_tests;
 mod text_selection;
@@ -116,6 +119,7 @@ pub struct GlyphApp {
     search_hits: Vec<PdfSearchHit>,
     selected_search_hit: Option<usize>,
     search_focus_requested: bool,
+    sheet_picker: Option<sheet_picker::SheetPicker>,
     page_entry: String,
     page_entry_focus_requested: bool,
     search_cancel: Arc<AtomicBool>,
@@ -268,6 +272,7 @@ impl GlyphApp {
             search_hits: Vec::new(),
             selected_search_hit: None,
             search_focus_requested: false,
+            sheet_picker: None,
             page_entry: String::new(),
             page_entry_focus_requested: false,
             search_cancel: Arc::new(AtomicBool::new(false)),
@@ -298,6 +303,9 @@ impl GlyphApp {
     }
 
     fn choose_pdf(&mut self, ctx: &egui::Context) {
+        if self.block_inline_text_transition() {
+            return;
+        }
         if let Some(path) = rfd::FileDialog::new()
             .set_title("Choose PDF in Glyph")
             .add_filter("PDF documents", &["pdf"])
@@ -812,6 +820,9 @@ impl GlyphApp {
     }
 
     fn select_page(&mut self, page_index: usize, ctx: &egui::Context) {
+        if self.sheet_picker.is_some() {
+            return;
+        }
         if self.render_worker_failed() || self.loading_document.is_some() {
             return;
         }
@@ -827,6 +838,9 @@ impl GlyphApp {
     }
 
     fn select_page_without_history(&mut self, page_index: usize, ctx: &egui::Context) {
+        if self.sheet_picker.is_some() {
+            return;
+        }
         if self.render_worker_failed() || self.loading_document.is_some() {
             return;
         }
@@ -1172,6 +1186,9 @@ impl GlyphApp {
     }
 
     fn reset_view(&mut self) {
+        if self.sheet_picker.is_some() {
+            return;
+        }
         self.fit_mode = FitMode::Manual;
         self.fitted_viewport = None;
         self.fit_to_width_requested = false;
@@ -1182,6 +1199,9 @@ impl GlyphApp {
     }
 
     fn handle_dropped_files(&mut self, ctx: &egui::Context) {
+        if self.sheet_picker.is_some() {
+            return;
+        }
         let dropped_path = ctx.input(|input| {
             input
                 .raw
@@ -1470,6 +1490,9 @@ impl GlyphApp {
     }
 
     fn restore_view(&mut self, view: ViewLocation, ctx: &egui::Context) {
+        if self.sheet_picker.is_some() {
+            return;
+        }
         self.select_page_without_history(view.page, ctx);
         self.zoom = view.zoom;
         self.pan = view.pan;
@@ -1482,6 +1505,9 @@ impl GlyphApp {
     }
 
     fn go_back(&mut self, ctx: &egui::Context) {
+        if self.sheet_picker.is_some() {
+            return;
+        }
         if self.render_worker_failed() || self.loading_document.is_some() {
             return;
         }
@@ -1490,6 +1516,9 @@ impl GlyphApp {
         }
     }
     fn go_forward(&mut self, ctx: &egui::Context) {
+        if self.sheet_picker.is_some() {
+            return;
+        }
         if self.render_worker_failed() || self.loading_document.is_some() {
             return;
         }
@@ -1499,14 +1528,50 @@ impl GlyphApp {
     }
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
+        self.handle_shortcuts_with_open_picker(ctx, Self::choose_pdf);
+    }
+
+    fn handle_shortcuts_with_open_picker(
+        &mut self,
+        ctx: &egui::Context,
+        open: impl FnOnce(&mut Self, &egui::Context),
+    ) {
+        self.validate_sheet_picker(ctx);
+        if self.inline_text_shortcuts(ctx) {
+            return;
+        }
+        if self.sheet_picker_ready()
+            && ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::L))
+        {
+            self.open_sheet_picker();
+        }
+        if self.sheet_picker.is_some() {
+            if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+                self.close_sheet_picker(ctx);
+                return;
+            }
+            // Do not consume these here: existing handlers own their dispatch and guards.
+            let handoff = ctx.input(|input| input.events.iter().any(|event| {
+                matches!(event, egui::Event::Key { key: egui::Key::S | egui::Key::O | egui::Key::W | egui::Key::Q | egui::Key::G, pressed: true, modifiers, .. } if modifiers.command)
+            }));
+            if handoff {
+                self.close_sheet_picker(ctx);
+            } else {
+                return;
+            }
+        }
         if self.editing_modal_open() {
+            return;
+        }
+        if ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::Q)) {
+            self.request_keyboard_quit(ctx);
             return;
         }
         if self.handle_edit_shortcuts(ctx) {
             return;
         }
         if ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::O)) {
-            self.choose_pdf(ctx);
+            open(self, ctx);
         }
         if ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::F)) {
             self.navigation_tab = NavigationTab::Search;
@@ -1674,6 +1739,11 @@ impl GlyphApp {
         self.handle_dropped_files(&ctx);
         self.handle_shortcuts(&ctx);
         self.editing_dialogs(&ctx);
+
+        // The picker owns input even on its first frame, before modal layer tracking settles.
+        if self.sheet_picker.is_some() {
+            ui.disable();
+        }
 
         egui::Panel::top("title_bar")
             .frame(
@@ -2026,7 +2096,7 @@ impl GlyphApp {
                 let available = ui.available_size();
                 let (rect, response) = ui.allocate_exact_size(available, egui::Sense::click_and_drag());
                 self.apply_view_fit(rect);
-                if self.markup.mode==markup::Mode::View{self.interact_with_page_text(ui,&response,rect);}
+                if self.sheet_picker.is_none() && self.markup.mode==markup::Mode::View{self.interact_with_page_text(ui,&response,rect);}
                 let pointer_delta = ui.input(|i| i.pointer.delta());
                 let middle_pan = response.hovered()
                     && ui.input(|i| i.pointer.button_down(egui::PointerButton::Middle))
@@ -2098,7 +2168,7 @@ impl GlyphApp {
                         let tile_rect = tile_screen_rect(tile, page_rect);
                         painter.image(tile_texture.id(),tile_rect,egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),egui::Color32::WHITE);
                     }
-                    self.interact_with_markup(ui,&response,page_rect,rect,page_index);
+                    if self.sheet_picker.is_none() { self.interact_with_markup(ui,&response,page_rect,rect,page_index); }
                     self.paint_markup(&painter,page_rect,page_index);
                     self.paint_text_selection(&painter,page_rect,rect);
                     let mut link_target = None;
@@ -2133,6 +2203,7 @@ impl GlyphApp {
             });
         // Canvas release must commit before a same-frame Save starts a worker.
         self.finish_save_intent(&ctx);
+        self.draw_sheet_picker(&ctx);
     }
 }
 

@@ -8,6 +8,90 @@ use std::collections::HashSet;
 pub enum ShapeKind {
     Rectangle,
     Ellipse,
+    Line,
+    Arrow,
+    Text,
+}
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ShapeStyle {
+    pub rgb: [f32; 3],
+    pub weight: f32,
+}
+impl Default for ShapeStyle {
+    fn default() -> Self {
+        Self {
+            rgb: [1., 0., 0.],
+            weight: 2.,
+        }
+    }
+}
+impl ShapeStyle {
+    pub fn validate(self) -> Result<(), PdfError> {
+        if self
+            .rgb
+            .iter()
+            .any(|v| !v.is_finite() || !(0. ..=1.).contains(v))
+            || !self.weight.is_finite()
+            || self.weight <= 0.
+            || self.weight > 64.
+        {
+            return Err(error("invalid shape stroke style"));
+        }
+        Ok(())
+    }
+    pub(super) fn prefix(self) -> String {
+        format!(
+            "q {} {} {} RG {} w",
+            self.rgb[0], self.rgb[1], self.rgb[2], self.weight
+        )
+    }
+}
+pub(super) fn read_style(doc: &Document, d: &lopdf::Dictionary) -> Result<ShapeStyle, PdfError> {
+    let style = match (d.has(b"GlyphStrokeRGB"), d.has(b"GlyphStrokeWeight")) {
+        (false, false) => ShapeStyle::default(),
+        (true, true) => {
+            let rgb = resolve(doc, d.get(b"GlyphStrokeRGB").map_err(error)?)?
+                .as_array()
+                .map_err(error)?;
+            if rgb.len() != 3 {
+                return Err(error("invalid stroke RGB"));
+            }
+            let mut color = [0.; 3];
+            for (a, b) in color.iter_mut().zip(rgb) {
+                *a = resolve(doc, b)?.as_float().map_err(error)?;
+            }
+            ShapeStyle {
+                rgb: color,
+                weight: resolve(doc, d.get(b"GlyphStrokeWeight").map_err(error)?)?
+                    .as_float()
+                    .map_err(error)?,
+            }
+        }
+        _ => return Err(error("incomplete stroke style metadata")),
+    };
+    style.validate()?;
+    let color = resolve(doc, d.get(b"C").map_err(error)?)?
+        .as_array()
+        .map_err(error)?;
+    if color.len() != 3 {
+        return Err(error("invalid native stroke color"));
+    }
+    for (a, b) in color.iter().zip(style.rgb) {
+        if resolve(doc, a)?.as_float().map_err(error)? != b {
+            return Err(error("stroke color mismatch"));
+        }
+    }
+    let bs = resolve(doc, d.get(b"BS").map_err(error)?)?
+        .as_dict()
+        .map_err(error)?;
+    if resolve(doc, bs.get(b"W").map_err(error)?)?
+        .as_float()
+        .map_err(error)?
+        != style.weight
+    {
+        return Err(error("stroke weight mismatch"));
+    }
+    Ok(style)
 }
 /// `rect` is the bounding box in normalized 0..1 display coordinates, top-left
 /// origin, after inherited crop and clockwise page rotation.
@@ -17,13 +101,17 @@ pub struct ShapeAnnotation {
     pub page_index: usize,
     pub rect: PdfRect,
     pub kind: ShapeKind,
+    pub style: ShapeStyle,
+    pub endpoints: Option<[f32; 4]>,
+    pub line_head: Option<[f32; 4]>,
+    pub text: Option<super::TextMarkup>,
 }
 /// Compatibility name for callers of the original rectangle API.
 pub type RectangleAnnotation = ShapeAnnotation;
 fn error(e: impl std::fmt::Display) -> PdfError {
     PdfError::Edit(e.to_string())
 }
-fn resolve<'a>(doc: &'a Document, mut o: &'a Object) -> Result<&'a Object, PdfError> {
+pub(super) fn resolve<'a>(doc: &'a Document, mut o: &'a Object) -> Result<&'a Object, PdfError> {
     let mut seen = HashSet::new();
     while let Object::Reference(id) = o {
         if !seen.insert(*id) || seen.len() > 256 {
@@ -54,7 +142,7 @@ fn inherited(doc: &Document, page: ObjectId, key: &[u8]) -> Result<Option<Object
         }
     }
 }
-fn numbers(doc: &Document, o: &Object) -> Result<[f32; 4], PdfError> {
+pub(super) fn numbers(doc: &Document, o: &Object) -> Result<[f32; 4], PdfError> {
     let a = resolve(doc, o)?.as_array().map_err(error)?;
     if a.len() != 4 {
         return Err(error("rectangle requires four coordinates"));
@@ -156,6 +244,22 @@ pub(super) fn read(doc: &Document) -> Result<Vec<ShapeAnnotation>, PdfError> {
         page_geometry(doc, *page)?;
         for o in annots(doc, *page)?.1 {
             let d = resolve(doc, &o)?.as_dict().map_err(error)?;
+            if d.has(b"GlyphText") {
+                let item = super::free_text::read(doc, *page, page_index, &o)?;
+                if !seen.insert(item.object_id) {
+                    return Err(error("duplicate owned text"));
+                }
+                result.push(item);
+                continue;
+            }
+            if d.has(b"GlyphLine") || d.has(b"GlyphArrow") {
+                let item = super::lines::read(doc, *page, page_index, &o)?;
+                if !seen.insert(item.object_id) {
+                    return Err(error("duplicate owned shape"));
+                }
+                result.push(item);
+                continue;
+            }
             let (kind, marker, subtype) = match (d.has(b"GlyphRectangle"), d.has(b"GlyphEllipse")) {
                 (false, false) => continue,
                 (true, false) => (
@@ -214,6 +318,7 @@ pub(super) fn read(doc: &Document) -> Result<Vec<ShapeAnnotation>, PdfError> {
             {
                 return Err(error("invalid shape appearance"));
             }
+            validate_matrix(doc, &stream.dict)?;
             let bbox = numbers(doc, stream.dict.get(b"BBox").map_err(error)?)?;
             if bbox[2] <= bbox[0] || bbox[3] <= bbox[1] {
                 return Err(error("degenerate owned shape appearance BBox"));
@@ -223,10 +328,29 @@ pub(super) fn read(doc: &Document) -> Result<Vec<ShapeAnnotation>, PdfError> {
                 page_index,
                 rect,
                 kind,
+                style: read_style(doc, d)?,
+                endpoints: None,
+                line_head: None,
+                text: None,
             });
         }
     }
     Ok(result)
+}
+pub(super) fn validate_matrix(doc: &Document, d: &lopdf::Dictionary) -> Result<(), PdfError> {
+    if let Ok(o) = d.get(b"Matrix") {
+        let m = resolve(doc, o)?.as_array().map_err(error)?;
+        if m.len() != 6 {
+            return Err(error("invalid owned appearance matrix"));
+        }
+        for (o, expected) in m.iter().zip([1., 0., 0., 1., 0., 0.]) {
+            let n = resolve(doc, o)?.as_float().map_err(error)?;
+            if !n.is_finite() || n != expected {
+                return Err(error("invalid owned appearance matrix"));
+            }
+        }
+    }
+    Ok(())
 }
 fn pdf_number(n: f32) -> Object {
     if n.fract() == 0. && (n as f64).abs() < i64::MAX as f64 {
@@ -241,45 +365,73 @@ pub(super) fn create(
     rect: PdfRect,
     kind: ShapeKind,
 ) -> Result<ObjectId, PdfError> {
+    create_styled(doc, page, rect, kind, ShapeStyle::default())
+}
+pub(super) fn create_styled(
+    doc: &mut Document,
+    page: ObjectId,
+    rect: PdfRect,
+    kind: ShapeKind,
+    style: ShapeStyle,
+) -> Result<ObjectId, PdfError> {
+    style.validate()?;
     let b = mapped(doc, page, rect)?;
     let (w, h) = (b[2] - b[0], b[3] - b[1]);
-    // Inset by at most one point; tiny valid shapes can clip the 2pt stroke.
-    let (ix, iy) = (1f32.min(w / 4.), 1f32.min(h / 4.));
+    let bytes = appearance(w, h, kind, style)?;
+    let appearance = doc.add_object(Stream::new(
+        dictionary! {"Type" => "XObject", "Subtype" => "Form", "FormType" => 1,
+            "BBox" => vec![0.into(), 0.into(), pdf_number(w), pdf_number(h)], "Resources" => dictionary! {}}, bytes));
+    Ok(doc.add_object(dictionary! {
+        "Type" => "Annot", "Subtype" => if kind == ShapeKind::Rectangle { "Square" } else { "Circle" },
+        if kind == ShapeKind::Rectangle { "GlyphRectangle" } else { "GlyphEllipse" } => 1,
+        "GlyphNormalizedRect" => vec![pdf_number(rect.x), pdf_number(rect.y), pdf_number(rect.width), pdf_number(rect.height)],
+        "GlyphStrokeRGB" => style.rgb.into_iter().map(pdf_number).collect::<Vec<_>>(),
+        "GlyphStrokeWeight" => pdf_number(style.weight),
+        "Rect" => b.into_iter().map(pdf_number).collect::<Vec<_>>(), "P" => page, "F" => 4,
+        "C" => style.rgb.into_iter().map(pdf_number).collect::<Vec<_>>(),
+        "BS" => dictionary! {"W" => pdf_number(style.weight), "S" => "S"},
+        "Border" => vec![0.into(), 0.into(), pdf_number(style.weight)],
+        "AP" => dictionary! {"N" => appearance}}))
+}
+fn appearance(w: f32, h: f32, kind: ShapeKind, style: ShapeStyle) -> Result<Vec<u8>, PdfError> {
+    let (ix, iy) = (
+        (style.weight / 2.).min(w / 4.),
+        (style.weight / 2.).min(h / 4.),
+    );
     let bytes = match kind {
-        ShapeKind::Rectangle => format!("q 1 0 0 RG 2 w {ix} {iy} {} {} re S Q\n", w - 2. * ix, h - 2. * iy),
+        ShapeKind::Rectangle => format!(
+            "q 1 0 0 RG 2 w {ix} {iy} {} {} re S Q\n",
+            w - 2. * ix,
+            h - 2. * iy
+        ),
         ShapeKind::Ellipse => {
             let (cx, cy) = (w / 2., h / 2.);
             let (rx, ry) = (cx - ix, cy - iy);
             let (kx, ky) = (rx * 0.552_284_8, ry * 0.552_284_8);
-            format!("q 1 0 0 RG 2 w {} {cy} m {} {} {} {} {cx} {} c {} {} {ix} {} {ix} {cy} c {ix} {} {} {iy} {cx} {iy} c {} {iy} {} {} {} {cy} c h S Q\n",
-                w-ix, w-ix, cy+ky, cx+kx, h-iy, h-iy,
-                cx-kx, h-iy, cy+ky, cy-ky, cx-kx,
-                cx+kx, w-ix, cy-ky, w-ix)
+            format!(
+                "q 1 0 0 RG 2 w {} {cy} m {} {} {} {} {cx} {} c {} {} {ix} {} {ix} {cy} c {ix} {} {} {iy} {cx} {iy} c {} {iy} {} {} {} {cy} c h S Q\n",
+                w - ix,
+                w - ix,
+                cy + ky,
+                cx + kx,
+                h - iy,
+                h - iy,
+                cx - kx,
+                h - iy,
+                cy + ky,
+                cy - ky,
+                cx - kx,
+                cx + kx,
+                w - ix,
+                cy - ky,
+                w - ix
+            )
         }
-    }.into_bytes();
-    let appearance = doc.add_object(Stream::new(
-        dictionary! {
-            "Type" => "XObject",
-            "Subtype" => "Form",
-            "FormType" => 1,
-            "BBox" => vec![0.into(), 0.into(), pdf_number(w), pdf_number(h)],
-            "Resources" => dictionary! {},
-        },
-        bytes,
-    ));
-    Ok(doc.add_object(dictionary! {
-        "Type" => "Annot",
-        "Subtype" => match kind { ShapeKind::Rectangle => "Square", ShapeKind::Ellipse => "Circle" },
-        match kind { ShapeKind::Rectangle => "GlyphRectangle", ShapeKind::Ellipse => "GlyphEllipse" } => 1,
-        // Retain exact normalized f32 values rather than accumulating inverse
-        // crop/rotation roundoff each time a saved document is reopened.
-        "GlyphNormalizedRect" => vec![pdf_number(rect.x), pdf_number(rect.y), pdf_number(rect.width), pdf_number(rect.height)],
-        "Rect" => b.into_iter().map(pdf_number).collect::<Vec<_>>(),
-        "P" => page,
-        "F" => 4,
-        "C" => vec![1.into(), 0.into(), 0.into()],
-        "BS" => dictionary! {"W" => 2, "S" => "S"},
-        "Border" => vec![0.into(), 0.into(), 2.into()],
-        "AP" => dictionary! {"N" => appearance},
-    }))
+        ShapeKind::Line | ShapeKind::Arrow | ShapeKind::Text => {
+            return Err(error("shape requires specialized content"));
+        }
+    };
+    Ok(bytes
+        .replacen("q 1 0 0 RG 2 w", &style.prefix(), 1)
+        .into_bytes())
 }

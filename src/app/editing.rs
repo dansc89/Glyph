@@ -43,6 +43,7 @@ struct DeferredSave {
     generation: u64,
     path: PathBuf,
     command: Command,
+    inline_intent: Option<markup::SaveIntent>,
 }
 struct PendingEdit {
     kind: EditKind,
@@ -86,7 +87,18 @@ enum Decision {
     Cancel,
 }
 enum Command {
+    Text {
+        page: usize,
+        rect: crate::core::links::PdfRect,
+        text: crate::pdf::TextMarkup,
+        style: crate::pdf::ShapeStyle,
+    },
     LoadMarkups,
+    Line {
+        page: usize,
+        endpoints: [f32; 4],
+        arrow: bool,
+    },
     Rectangle {
         page: usize,
         rect: crate::core::links::PdfRect,
@@ -95,6 +107,7 @@ enum Command {
         page: usize,
         rect: crate::core::links::PdfRect,
     },
+    UpdateShape(crate::pdf::ShapeAnnotation),
     DeleteShape(lopdf::ObjectId),
     Rename {
         index: usize,
@@ -113,6 +126,47 @@ enum Command {
 }
 
 impl GlyphApp {
+    pub(super) fn defer_inline_text_save(
+        &mut self,
+        intent: markup::SaveIntent,
+        ctx: &egui::Context,
+    ) {
+        self.defer_save(Command::Save, ctx);
+        if let Some(request) = &mut self.editing.deferred_save {
+            request.inline_intent = Some(intent);
+        }
+    }
+    pub(super) fn validate_inline_text(
+        &self,
+        page: usize,
+        rect: crate::core::links::PdfRect,
+        text: &crate::pdf::TextMarkup,
+        style: crate::pdf::ShapeStyle,
+    ) -> Result<(), PdfError> {
+        text.validate()?;
+        if let Some(session) = &self.editing.session {
+            session.validate_text(page, rect, text, style)?;
+        }
+        Ok(())
+    }
+    pub(super) fn add_text_markup(
+        &mut self,
+        page: usize,
+        rect: crate::core::links::PdfRect,
+        text: crate::pdf::TextMarkup,
+        style: crate::pdf::ShapeStyle,
+        ctx: &egui::Context,
+    ) {
+        self.start_edit(
+            Command::Text {
+                page,
+                rect,
+                text,
+                style,
+            },
+            ctx,
+        );
+    }
     pub(super) fn request_page_label(&mut self, page: usize, ctx: &egui::Context) {
         if self.editing_modal_open()
             || self.editing.pending.is_some()
@@ -140,6 +194,15 @@ impl GlyphApp {
         });
         ctx.request_repaint();
     }
+    pub(super) fn markup_page_size(&self, page: usize) -> Option<egui::Vec2> {
+        let [w, h] = self
+            .editing
+            .session
+            .as_ref()?
+            .display_page_size(page)
+            .ok()?;
+        Some(egui::vec2(w, h))
+    }
     pub(super) fn can_change_markups(&self) -> bool {
         self.project.document.is_some()
             && !self.render_worker_failed()
@@ -150,6 +213,18 @@ impl GlyphApp {
             && self.automation_rx.is_none()
             && !self.editing.unrecoverable
             && !self.editing_modal_open()
+    }
+    pub(super) fn inline_text_unsaved_decision(&self) -> bool {
+        self.editing.transition.is_some()
+            && self.editing.rename.is_none()
+            && self.project.document.is_some()
+            && !self.render_worker_failed()
+            && !self.markup.preview_pending
+            && self.editing.preview_error.is_none()
+            && self.loading_document.is_none()
+            && self.editing.pending.is_none()
+            && self.automation_rx.is_none()
+            && !self.editing.unrecoverable
     }
     pub(super) fn load_markups(&mut self, ctx: &egui::Context) {
         self.start_edit(Command::LoadMarkups, ctx);
@@ -173,6 +248,31 @@ impl GlyphApp {
     }
     pub(super) fn delete_shape(&mut self, id: lopdf::ObjectId, ctx: &egui::Context) {
         self.start_edit(Command::DeleteShape(id), ctx);
+    }
+    pub(super) fn add_line(
+        &mut self,
+        page: usize,
+        endpoints: [f32; 4],
+        arrow: bool,
+        ctx: &egui::Context,
+    ) {
+        if self.can_change_markups() && page == self.project.selected_page {
+            self.start_edit(
+                Command::Line {
+                    page,
+                    endpoints,
+                    arrow,
+                },
+                ctx,
+            );
+        }
+    }
+    pub(super) fn update_markup(
+        &mut self,
+        shape: crate::pdf::ShapeAnnotation,
+        ctx: &egui::Context,
+    ) {
+        self.start_edit(Command::UpdateShape(shape), ctx);
     }
     pub(super) fn persistent_edit_error(&self) -> Option<&str> {
         self.editing
@@ -279,7 +379,7 @@ impl GlyphApp {
         let can_edit = ready && !self.editing.unrecoverable;
         if ui
             .add_enabled(
-                can_edit && self.editing.dirty,
+                can_edit && (self.editing.dirty || self.markup.text_draft.is_some()),
                 egui::Button::new("Save").shortcut_text("Ctrl+S"),
             )
             .clicked()
@@ -302,6 +402,7 @@ impl GlyphApp {
         if ui
             .add_enabled(
                 can_edit
+                    && self.markup.text_draft.is_none()
                     && self
                         .editing
                         .session
@@ -317,6 +418,7 @@ impl GlyphApp {
         if ui
             .add_enabled(
                 can_edit
+                    && self.markup.text_draft.is_none()
                     && self
                         .editing
                         .session
@@ -360,6 +462,9 @@ impl GlyphApp {
         picker: impl FnOnce(rfd::FileDialog) -> Option<PathBuf>,
         defer: bool,
     ) {
+        if self.request_inline_text_save(markup::SaveIntent::SaveAs, ctx) {
+            return;
+        }
         if self.editing.unrecoverable {
             self.status = self.editing.error.clone().unwrap_or_default();
             return;
@@ -406,6 +511,17 @@ impl GlyphApp {
         }
     }
     fn choose_save_as(&mut self, ctx: &egui::Context) {
+        if self.request_inline_text_save(markup::SaveIntent::SaveAs, ctx) {
+            return;
+        }
+        // Substitute only the OS dialog in headless production-draw tests.
+        #[cfg(test)]
+        if let Some(destination) =
+            ctx.data_mut(|d| d.remove_temp::<Option<PathBuf>>(egui::Id::new("test-save-as-picker")))
+        {
+            self.save_as_with_picker(ctx, |_| destination);
+            return;
+        }
         self.save_as_with_picker(ctx, rfd::FileDialog::save_file);
     }
 
@@ -439,6 +555,7 @@ impl GlyphApp {
                 generation: self.document_generation,
                 path: document.path.clone(),
                 command,
+                inline_intent: None,
             });
             ctx.request_repaint();
         }
@@ -453,7 +570,7 @@ impl GlyphApp {
                 .document
                 .as_ref()
                 .is_none_or(|d| d.path != request.path)
-            || self.editing_modal_open()
+            || (self.editing_modal_open() && !self.editing.save_before_transition)
             || self.editing.unrecoverable
             || self.loading_document.is_some()
             || self.automation_rx.is_some()
@@ -465,6 +582,10 @@ impl GlyphApp {
             return;
         }
         let request = self.editing.deferred_save.take().unwrap();
+        if matches!(request.inline_intent, Some(markup::SaveIntent::SaveAs)) {
+            self.choose_save_as(ctx);
+            return;
+        }
         self.start_edit(request.command, ctx);
     }
     pub(super) fn handle_edit_shortcuts(&mut self, ctx: &egui::Context) -> bool {
@@ -707,6 +828,10 @@ impl GlyphApp {
         if !ctx.input(|i| i.viewport().close_requested()) {
             return;
         }
+        if self.block_inline_text_transition() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            return;
+        }
         if self.editing_modal_open() {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.status = "Finish or cancel the current dialog before closing the window.".into();
@@ -721,6 +846,9 @@ impl GlyphApp {
         }
     }
     fn request_close_document(&mut self, _ctx: &egui::Context) {
+        if self.block_inline_text_transition() {
+            return;
+        }
         if self.editing.pending.is_some() || self.loading_document.is_some() {
             self.status = "Wait for the current document operation.".into();
             return;
@@ -782,6 +910,19 @@ impl GlyphApp {
             if self.editing.transition.is_none() {
                 return;
             }
+            if self.markup.text_draft.is_some() {
+                let transition = self.editing.transition.take();
+                // The decision owns input, so there is no editable text widget
+                // in this frame. Validate/commit its retained draft exactly once.
+                if !self.finish_inline_text(_ctx) {
+                    self.editing.save_before_transition = false;
+                    return; // invalid draft returns to its editable surface
+                }
+                self.defer_save(Command::Save, _ctx);
+                self.editing.transition = transition;
+                self.editing.save_before_transition = true;
+                return;
+            }
             self.editing.save_before_transition = true;
             self.start_edit(Command::Save, _ctx);
             return;
@@ -809,6 +950,11 @@ impl GlyphApp {
         }
     }
     fn start_edit(&mut self, command: Command, ctx: &egui::Context) {
+        if matches!(command, Command::Save)
+            && self.request_inline_text_save(markup::SaveIntent::Save, ctx)
+        {
+            return;
+        }
         self.start_edit_with_serializer(command, ctx, EditablePdf::render_snapshot);
     }
     fn start_edit_with_serializer(
@@ -817,6 +963,34 @@ impl GlyphApp {
         ctx: &egui::Context,
         serialize: impl FnOnce(&EditablePdf) -> Result<Vec<u8>, PdfError> + Send + 'static,
     ) {
+        if matches!(command, Command::Undo | Command::Redo) && self.markup.text_draft.is_some() {
+            self.status =
+                "Apply text or Cancel the text draft before using document Undo/Redo.".into();
+            return;
+        }
+        if let Command::UpdateShape(shape) = &command
+            && (!self.can_change_markups()
+                || shape.page_index != self.project.selected_page
+                || !self
+                    .markup
+                    .items
+                    .iter()
+                    .any(|a| a.object_id == shape.object_id && a.page_index == shape.page_index))
+        {
+            return;
+        }
+        if let Command::Line { page, .. } = &command
+            && (!self.can_change_markups() || *page != self.project.selected_page)
+        {
+            return;
+        }
+        if let Command::Text { page, .. } = &command
+            && (!self.can_change_markups()
+                || *page != self.project.selected_page
+                || self.markup.text_draft.is_some())
+        {
+            return;
+        }
         if self.render_worker_failed() && !matches!(&command, Command::Save | Command::SaveAs(_)) {
             self.status = RENDER_WORKER_FAILURE.into();
             return;
@@ -824,7 +998,10 @@ impl GlyphApp {
         if self.preview_unavailable()
             && matches!(
                 &command,
-                Command::Rectangle { .. } | Command::Ellipse { .. } | Command::DeleteShape(_)
+                Command::Rectangle { .. }
+                    | Command::Ellipse { .. }
+                    | Command::Line { .. }
+                    | Command::DeleteShape(_)
             )
         {
             self.status = self.editing.preview_error.clone().unwrap();
@@ -910,6 +1087,7 @@ impl GlyphApp {
         .into();
         let ctx = ctx.clone();
         let retry_preview = self.preview_unavailable();
+        let creation_style = self.markup.next_style;
         thread::spawn(move || {
             let is_save = matches!(&command, Command::Save | Command::SaveAs(_));
             let before = session
@@ -923,9 +1101,31 @@ impl GlyphApp {
                 }
                 let editor = session.as_mut().unwrap();
                 match command {
+                    Command::Text {
+                        page,
+                        rect,
+                        text,
+                        style,
+                    } => editor.add_text(page, rect, &text.contents, text.size, style),
                     Command::LoadMarkups => Ok(false),
-                    Command::Rectangle { page, rect } => editor.add_rectangle(page, rect),
-                    Command::Ellipse { page, rect } => editor.add_ellipse(page, rect),
+                    Command::Rectangle { page, rect } => editor.add_shape_styled(
+                        page,
+                        rect,
+                        crate::pdf::ShapeKind::Rectangle,
+                        creation_style,
+                    ),
+                    Command::Ellipse { page, rect } => editor.add_shape_styled(
+                        page,
+                        rect,
+                        crate::pdf::ShapeKind::Ellipse,
+                        creation_style,
+                    ),
+                    Command::Line {
+                        page,
+                        endpoints,
+                        arrow,
+                    } => editor.add_line_styled(page, endpoints, arrow, creation_style),
+                    Command::UpdateShape(shape) => editor.update_shape(&shape),
                     Command::DeleteShape(id) => editor.delete_shape(id),
                     Command::Rename {
                         index: _,
@@ -1166,6 +1366,9 @@ impl GlyphApp {
         ctx.request_repaint();
     }
     pub(super) fn defer_document_open(&mut self, path: PathBuf) -> bool {
+        if self.block_inline_text_transition() {
+            return true;
+        }
         if self.editing_modal_open() {
             self.status = "Finish or cancel the current dialog before opening another PDF.".into();
             return true;
@@ -1189,6 +1392,10 @@ mod operation_ui_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+    include!("line_arrow_tests.rs");
+    include!("line_arrow_boundary_tests.rs");
+    include!("editable_markup_tests.rs");
+    include!("text_markup_tests.rs");
     fn finishing_frame(app: &mut GlyphApp, ctx: &egui::Context, events: Vec<egui::Event>) {
         finishing_frame_with_picker(app, ctx, events, |_| panic!("unexpected native picker"));
     }
@@ -1647,7 +1854,9 @@ mod tests {
         );
         frame.textures_delta.clear();
         let mut app = setup(&path, &ctx);
-        app.markup.loaded = true;
+        app.load_markups(&ctx);
+        settle(&mut app, &ctx);
+        wait_preview(&mut app, &ctx);
         press(&mut app, &ctx, egui::Key::E, egui::Modifiers::NONE);
         assert!(
             app.markup.mode == markup::Mode::Ellipse,
@@ -1689,8 +1898,16 @@ mod tests {
                             (e.center - expected.center()).length() < 0.0001,
                             "ghost stays in display coordinates"
                         );
-                        assert!((e.radius - expected.size() / 2.).length() < 0.0001);
-                        assert_eq!(e.stroke.width, 2.);
+                        assert!(
+                            (e.radius
+                                - (expected.size() / 2. - egui::Vec2::splat(e.stroke.width / 2.)))
+                            .length()
+                                < 0.0001
+                        );
+                        assert!(
+                            (e.stroke.width - 2. * 400. / 600.).abs() < 0.0001,
+                            "ellipse preview must use PDF points, not fixed overlay pixels"
+                        );
                         *oval = true;
                     }
                     egui::epaint::Shape::Ellipse(e) if e.radius == egui::vec2(7., 5.5) => {

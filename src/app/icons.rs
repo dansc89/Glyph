@@ -16,6 +16,9 @@ pub(super) enum Icon {
     Select,
     Rectangle,
     Ellipse,
+    Line,
+    Arrow,
+    Text,
     Delete,
     Sidebar,
     Pages,
@@ -41,6 +44,9 @@ impl Icon {
             Self::Select => "Select markup",
             Self::Rectangle => "Rectangle",
             Self::Ellipse => "Ellipse",
+            Self::Line => "Line",
+            Self::Arrow => "Arrow",
+            Self::Text => "Text",
             Self::Delete => "Delete",
             Self::Sidebar => "Toggle sidebar",
             Self::Pages => "Pages",
@@ -63,9 +69,20 @@ impl Icon {
             Self::Reset => "Reset view",
             Self::View => "View (Escape): pan and select PDF text",
             Self::Select => "Select markup (V): select Glyph shapes",
-            Self::Rectangle => "Rectangle (R): drag a red, unfilled, 2 pt rectangle",
-            Self::Ellipse => "Ellipse (E): drag a red, unfilled, 2 pt ellipse",
+            Self::Rectangle => {
+                "Rectangle (R): drag an unfilled rectangle; use Markup properties for color and width"
+            }
+            Self::Ellipse => {
+                "Ellipse (E): drag an unfilled ellipse; use Markup properties for color and width"
+            }
+            Self::Line => {
+                "Line (L): click start, then end; use Markup properties for color and width"
+            }
+            Self::Arrow => {
+                "Arrow (A): click start, then end; open arrow with Markup properties color and width"
+            }
             Self::Delete => "Delete (Delete/Backspace): delete selected Glyph shape",
+            Self::Text => "Text (T): click to place or edit text on the PDF page",
             Self::Sidebar => "Toggle sidebar",
             Self::Pages => "Pages: physical page thumbnails",
             Self::Bookmarks => "Bookmarks: document outline",
@@ -157,6 +174,11 @@ fn paint(painter: &egui::Painter, center: Pos2, icon: Icon, ink: Color32) {
         painter.circle_stroke(p(x, y), r, stroke);
     };
     match icon {
+        Icon::Text => {
+            line((-6., -6.), (6., -6.));
+            line((0., -6.), (0., 6.));
+            line((-3., 6.), (3., 6.));
+        }
         Icon::ArrowLeft | Icon::ArrowRight => {
             let d = if icon == Icon::ArrowLeft { -1. } else { 1. };
             line((-6. * d, 0.), (6. * d, 0.));
@@ -174,6 +196,13 @@ fn paint(painter: &egui::Painter, center: Pos2, icon: Icon, ink: Color32) {
             }
         }
         Icon::Rectangle => rectangle(-7., -5.5, 14., 11.),
+        Icon::Line | Icon::Arrow => {
+            line((-6., 5.), (6., -5.));
+            if icon == Icon::Arrow {
+                line((6., -5.), (0., -4.));
+                line((6., -5.), (4., 1.));
+            }
+        }
         Icon::Ellipse => {
             painter.add(egui::Shape::ellipse_stroke(
                 center,
@@ -520,7 +549,7 @@ mod tests {
         });
         output.textures_delta.clear();
         assert_ne!(ids[0], ids[1]);
-        assert!(Icon::Rectangle.tooltip().contains("2 pt"));
-        assert!(Icon::Ellipse.tooltip().contains("2 pt"));
+        assert!(Icon::Rectangle.tooltip().contains("Markup properties"));
+        assert!(Icon::Ellipse.tooltip().contains("Markup properties"));
     }
 }

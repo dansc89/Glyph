@@ -16,7 +16,7 @@ jobs:
       - name: Install Linux GUI/package deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config libssl-dev libx11-dev libxi-dev libgl1-mesa-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev desktop-file-utils fakeroot wget xvfb xdotool ffmpeg python3-pil tesseract-ocr xclip python3-pypdf
+          sudo apt-get install -y build-essential pkg-config libssl-dev libx11-dev libxi-dev libgl1-mesa-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev desktop-file-utils fakeroot wget xvfb xdotool ffmpeg python3-pil tesseract-ocr xclip python3-pypdf poppler-utils
           cargo install cargo-deb --locked
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -41,6 +41,27 @@ jobs:
         run: python3 scripts/loading-state-qa.py --binary target/release/glyph --out dist/loading-qa
       - name: Whole-word double-click regression
         run: python3 scripts/audit-word-selection-qa.py --binary target/release/glyph --out dist/word-selection-qa
+      - name: Editable markup native regression
+        run: python3 scripts/markup-polish-qa.py --binary target/release/glyph --properties-x 788 --out dist/markup-polish-qa
+      - name: Searchable Go to Sheet regression
+        run: python3 scripts/sheet-picker-qa.py --binary target/release/glyph --out dist/sheet-picker-qa
+      - name: Persistent text native regression
+        run: python3 scripts/text-markup-qa.py --binary target/release/glyph --font-x 650 --font-y 430 --out dist/text-markup-qa
+      - name: Independent text PDF/Poppler verification
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          raw = json.loads(Path('dist/text-markup-qa/expected.json').read_text())
+          items = []
+          for item in raw['annotations']:
+              entry = dict(item)
+              # Native pointer geometry is separately checked with pixel-aware tolerance.
+              entry.pop('rect', None)
+              items.append(entry)
+          Path('dist/text-poppler-expected.json').write_text(json.dumps({'annotations': items}))
+          PY
+          python3 scripts/text-markup-render-qa.py --original dist/text-markup-qa/source-original.pdf --edited dist/text-markup-qa/edited.pdf --manifest dist/text-poppler-expected.json --out dist/text-poppler-qa
       - name: Display isolation checks
         run: python3 scripts/test-editing-qa-isolation.py
       - uses: actions/upload-artifact@v4
@@ -56,6 +77,10 @@ jobs:
             dist/save-stress-qa/
             dist/loading-qa/
             dist/word-selection-qa/
+            dist/markup-polish-qa/
+            dist/sheet-picker-qa/
+            dist/text-markup-qa/
+            dist/text-poppler-qa/
       - name: Check portable runtime deps
         run: |
           mkdir -p dist

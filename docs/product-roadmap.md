@@ -2,6 +2,12 @@
 
 Glyph is a standalone PDF editor for Arch Linux.
 
+## Acceptance target
+
+The project succeeds only with **complete Drawbridge v6.0 feature/workflow parity or better**, retaining native Omarchy interaction, compact PDF-first UI, reliable persistence/failure recovery, and measured responsiveness. Reference: https://github.com/dansc89/Drawbridge/releases/tag/v6.0, pinned source `3396a63a0ef0d680b1479e1bca225da671976577`.
+
+The older slice inventory below is historical, not a current completeness checklist. Per-increment test passes establish those increments only. Current text development evidence is in [text-markup-verification.md](text-markup-verification.md); its ASCII-only typography is a known parity gap, not an acceptable final substitute. Release, installation and normal-desktop launching are separate authorized actions.
+
 ## Implemented in Glyph
 
 - Native dark PDF workspace shell.
